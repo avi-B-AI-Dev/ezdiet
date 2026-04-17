@@ -1,50 +1,127 @@
-# Welcome to your Expo app 👋
+# EzDiet
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+AI-powered nutrition tracking for iOS and Android. Built with Expo, React Native, and a local SQLite-first data model.
 
-## Get started
+EzDiet personalizes your daily macro and calorie targets from a short smart onboarding (Mifflin–St Jeor + activity and goal multipliers), then gives you a clean daily dashboard to log meals, water, and track streaks.
 
-1. Install dependencies
+## Features
 
-   ```bash
-   npm install
-   ```
+- **Smart onboarding** — 4-step flow that collects basic info, goals, activity level, and body composition preference, then auto-calculates daily calorie and macro targets. Flags unhealthy weight-loss paces (>1 kg/week) with a recommended range.
+- **Daily dashboard** — Time-aware greeting, streak counter (consecutive days logged), hero "calories remaining" card, calorie progress ring, protein/carbs/fat progress bars, 4 meal slots per day, and a water tracker.
+- **Meal slots** — Breakfast, lunch, dinner, and snacks each support full logging or "quick add" (calories only).
+- **Water tracker** — Glasses / oz / liters, tap-to-cycle unit, +1 quick-add, and custom amount modal. Entries are converted on display so you can switch units without losing history.
+- **Profile** — Full edit surface for every onboarding answer (name, age, gender, height, weight, goal, timeframe, activity, composition) plus editable daily targets with a one-tap "recalculate from plan" button and water settings.
+- **Local-first** — All data lives in SQLite on the device. No account, no network dependency for core logging.
+- **Light and dark mode** — Follows the system setting with a consistent blue (`#3B82F6`) accent.
 
-2. Start the app
+## Tech stack
 
-   ```bash
-   npx expo start
-   ```
+| Concern | Choice |
+| --- | --- |
+| Runtime | Expo SDK 54, React Native 0.81, React 19 |
+| Language | TypeScript (strict) |
+| Routing | Expo Router 6 (file-based, typed routes) |
+| Storage | `expo-sqlite` (WAL mode, foreign keys on) |
+| Charts / graphics | `react-native-svg`, `react-native-chart-kit` |
+| Camera / images | `expo-camera`, `expo-image-picker` |
+| Misc | `@react-native-async-storage/async-storage`, `@expo/vector-icons` (Ionicons) |
 
-In the output, you'll find options to open the app in a
+## Architecture
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+### Folder layout
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```
+app/
+  _layout.tsx            # Root stack; inits DB, sets status bar, themed content bg
+  index.tsx              # Boot router: sends users to /onboarding or /dashboard
+  onboarding.tsx         # 4-step smart onboarding + result screen
+  (tabs)/
+    _layout.tsx          # Bottom tabs (Home / Log / Pantry / Profile)
+    dashboard.tsx        # Daily dashboard
+    log.tsx              # Meal logging (placeholder for now)
+    pantry.tsx           # Saved foods (placeholder for now)
+    profile.tsx          # Full profile editor + danger zone
+components/              # Reusable UI (CalorieRing, MacroBar, MealSlot, WaterCard, QuickAddModal)
+lib/
+  db/
+    client.ts            # DB singleton, schema, idempotent migrations, reset
+    users.ts, pantry.ts, meals.ts, recipes.ts, supplements.ts, water.ts
+    index.ts             # Barrel export
+  nutrition.ts           # BMR / TDEE / BMI / macro math, unit conversions
+  date.ts                # Date helpers and greetings
+  streak.ts              # Consecutive-day streak computation
+  theme.ts               # useTheme() hook + light/dark palettes
+  water-units.ts         # Unit conversion helpers
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+### Data model
 
-## Learn more
+Single-user, local SQLite. Schema in `lib/db/client.ts`.
 
-To learn more about developing your project with Expo, look at the following resources:
+| Table | Purpose |
+| --- | --- |
+| `users` | Profile + daily targets + water settings (single row) |
+| `pantry_items` | Saved/scanned foods with per-100g macros. `UNIQUE(name, brand)` for dedupe |
+| `meals` + `meal_ingredients` | Logged meals with optional ingredient breakdown |
+| `saved_recipes` + `recipe_ingredients` | Reusable recipes |
+| `supplements` + `supplement_log` | Supplement catalog + daily log |
+| `water_log` | Water intake entries (amount + unit) |
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+Foreign keys are enforced and indexes cover the hot paths (`logged_at`, FK columns, name/barcode lookups). Timestamps that represent user activity use local time so "today" queries line up with the device clock.
 
-## Join the community
+### Macro math
 
-Join our community of developers creating universal apps.
+`lib/nutrition.ts` implements the Mifflin–St Jeor equation and the plan calculation used by onboarding and the profile "Recalculate" button:
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+- **BMR** = `10·kg + 6.25·cm − 5·age + (male +5 / female −161 / other −78)`
+- **TDEE** = `BMR · activityMultiplier` — sedentary 1.2, light 1.375, moderate 1.55, very active 1.725
+- **Calories** = `TDEE − (weeklyKgDelta · 7700 / 7)`, floored at 1200 (female) / 1500 (male)
+- **Protein** = `bodyweightKg · {lose_fat: 1.6, build_muscle: 2.2, maintain/recomp: 1.8}` g
+- **Fat** = `calories · 0.25 / 9` g
+- **Carbs** = remaining calories `/ 4` g
+
+Weekly rate > 1 kg/week triggers a non-blocking warning with a recommended timeline range.
+
+## Getting started
+
+### Prerequisites
+
+- Node.js 20+
+- An iOS or Android device with the **Expo Go** app, or a simulator/emulator
+
+### Install and run
+
+```bash
+git clone https://github.com/avi-B-AI-Dev/ezdiet.git
+cd ezdiet
+npm install
+npm start
+```
+
+Scan the QR code with Expo Go (Android) or your camera (iOS), or press `i` / `a` in the Metro terminal for simulators.
+
+### Scripts
+
+| Command | Description |
+| --- | --- |
+| `npm start` | Start the Expo dev server |
+| `npm run ios` | Start and open the iOS simulator |
+| `npm run android` | Start and open the Android emulator |
+| `npm run web` | Start the web target |
+| `npm run lint` | Run Expo's ESLint config |
+
+### Reset local data
+
+If you want to walk through onboarding again, open the app → **Profile** tab → scroll to the bottom → **Reset all app data**. This deletes the SQLite database and routes you back to onboarding.
+
+## Roadmap
+
+- Full meal logging flow (barcode scan, photo capture, AI estimation, search)
+- Pantry management UI with favorites
+- Historical trends (weekly / monthly macro compliance, weight over time)
+- Supplement tracking UI
+- Export / import
+
+## License
+
+Private project. All rights reserved.
