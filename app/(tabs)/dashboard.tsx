@@ -15,24 +15,42 @@ import CalorieRing from "@/components/CalorieRing";
 import MacroBar from "@/components/MacroBar";
 import MealSlot from "@/components/MealSlot";
 import QuickAddModal from "@/components/QuickAddModal";
+import WaterAddModal from "@/components/WaterAddModal";
 import WaterCard from "@/components/WaterCard";
 import {
   createMeal,
+  dismissOccurrence,
   getUser,
+  listDashboardSupplements,
   listMealsByDate,
   listWaterByDate,
   logWater,
+  markOccurrenceTaken,
+  SUPPLEMENT_FREQUENCY_LABEL,
+  TIME_OF_DAY_LABEL,
+  toggleOccurrence,
   updateWaterSettings,
+  type DashboardSupplement,
   type Meal,
   type MealType,
+  type SupplementFrequency,
+  type TimeOfDay,
   type User,
   type WaterEntry,
   type WaterUnit,
 } from "@/lib/db";
-import { formatLongDate, greeting, localDateISO } from "@/lib/date";
+import {
+  DAY_NAMES,
+  daysBetween,
+  formatLongDate,
+  formatShortDate,
+  getDayOfWeek,
+  greeting,
+  localDateISO,
+} from "@/lib/date";
 import { computeStreak } from "@/lib/streak";
 import { Palette, useTheme } from "@/lib/theme";
-import { convertWater, nextWaterUnit } from "@/lib/water-units";
+import { nextWaterUnit, toMl } from "@/lib/water-units";
 
 const SLOTS: { type: MealType; title: string; icon: keyof typeof import("@expo/vector-icons").Ionicons.glyphMap }[] = [
   { type: "breakfast", title: "Breakfast", icon: "sunny-outline" },
@@ -58,19 +76,22 @@ export default function DashboardScreen() {
   const [streak, setStreak] = useState(0);
   const [favorites, setFavorites] = useState<Set<MealType>>(new Set());
   const [quickAdd, setQuickAdd] = useState<QuickAdd>(null);
+  const [dueSupps, setDueSupps] = useState<DashboardSupplement[]>([]);
 
   const load = useCallback(async () => {
     const today = localDateISO();
-    const [u, m, w, s] = await Promise.all([
+    const [u, m, w, s, sups] = await Promise.all([
       getUser(),
       listMealsByDate(today),
       listWaterByDate(today),
       computeStreak(),
+      listDashboardSupplements(),
     ]);
     setUser(u);
     setMeals(m);
     setWaterEntries(w);
     setStreak(s);
+    setDueSupps(sups);
   }, []);
 
   useFocusEffect(
@@ -103,13 +124,11 @@ export default function DashboardScreen() {
   }, [meals]);
 
   const waterUnit: WaterUnit = user?.water_unit ?? "glasses";
-  const waterGoal = user?.water_goal ?? 8;
-  const waterCurrent = useMemo(() => {
-    return waterEntries.reduce(
-      (sum, e) => sum + convertWater(e.amount, e.unit, waterUnit),
-      0,
-    );
-  }, [waterEntries, waterUnit]);
+  const waterGoalMl = user?.water_goal_ml ?? 2000;
+  const waterCurrentMl = useMemo(
+    () => waterEntries.reduce((sum, e) => sum + e.amount_ml, 0),
+    [waterEntries],
+  );
 
   const calorieGoal = user?.daily_calorie_goal ?? 0;
   const remaining = Math.max(calorieGoal - totals.calories, 0);
@@ -142,20 +161,68 @@ export default function DashboardScreen() {
   };
 
   const handleAddWaterOne = async () => {
-    await logWater(1, waterUnit);
+    await logWater(toMl(1, waterUnit));
     load();
   };
 
-  const handleAddWaterCustom = async (amount: number) => {
-    await logWater(amount, waterUnit);
+  const handleAddWaterCustomMl = async (ml: number) => {
+    await logWater(ml);
     setQuickAdd(null);
     load();
   };
 
   const handleCycleWaterUnit = async () => {
     const next = nextWaterUnit(waterUnit);
-    await updateWaterSettings(next, waterGoal);
+    await updateWaterSettings(next, waterGoalMl);
     load();
+  };
+
+  const today = localDateISO();
+
+  const handleToggleSupp = async (supplementId: number, date: string) => {
+    await toggleOccurrence(supplementId, date);
+    load();
+  };
+
+  const handleMarkLate = async (supplementId: number, date: string) => {
+    await markOccurrenceTaken(supplementId, date);
+    load();
+  };
+
+  const handleDismissMissed = async (supplementId: number, date: string) => {
+    await dismissOccurrence(supplementId, date);
+    load();
+  };
+
+  const dailyGroups = useMemo(() => {
+    const order: TimeOfDay[] = ["morning", "afternoon", "evening", "with_meal"];
+    const buckets: Record<TimeOfDay, DashboardSupplement[]> = {
+      morning: [],
+      afternoon: [],
+      evening: [],
+      with_meal: [],
+    };
+    for (const s of dueSupps) {
+      if (!s.isDaily) continue;
+      const tod: TimeOfDay = s.supplement.time_of_day ?? "morning";
+      buckets[tod].push(s);
+    }
+    return order
+      .filter((t) => buckets[t].length > 0)
+      .map((t) => ({ time: t, items: buckets[t] }));
+  }, [dueSupps]);
+
+  const nonDailyItems = useMemo(() => {
+    return dueSupps.filter((s) => !s.isDaily);
+  }, [dueSupps]);
+
+  const hasSupplements = dailyGroups.length > 0 || nonDailyItems.length > 0;
+
+  const handleManageSupps = () => {
+    router.push({
+      pathname: "/profile",
+      params: { scrollTo: "supplements" },
+    });
   };
 
   if (!user) {
@@ -249,13 +316,158 @@ export default function DashboardScreen() {
         <View style={styles.section}>
           <WaterCard
             unit={waterUnit}
-            goal={waterGoal}
-            current={waterCurrent}
+            goalMl={waterGoalMl}
+            currentMl={waterCurrentMl}
             colors={colors}
             onQuickAdd={handleAddWaterOne}
             onCustomAdd={() => setQuickAdd({ kind: "water" })}
             onCycleUnit={handleCycleWaterUnit}
           />
+        </View>
+
+        <View style={styles.section}>
+          <View style={styles.suppHeaderRow}>
+            <Text style={styles.sectionTitle}>Supplements &amp; Medications</Text>
+            <Pressable
+              onPress={handleManageSupps}
+              hitSlop={10}
+              style={({ pressed }) => pressed && { opacity: 0.5 }}
+            >
+              <Ionicons
+                name="settings-outline"
+                size={16}
+                color={colors.textMuted}
+              />
+            </Pressable>
+          </View>
+          <View
+            style={[
+              styles.suppsCard,
+              {
+                backgroundColor: colors.surface,
+                borderColor: colors.surfaceBorder,
+              },
+            ]}
+          >
+            {!hasSupplements ? (
+              <View style={styles.suppEmpty}>
+                <Ionicons
+                  name="medkit-outline"
+                  size={20}
+                  color={colors.textSubtle}
+                />
+                <Text
+                  style={[
+                    styles.suppEmptyTitle,
+                    { color: colors.text },
+                  ]}
+                >
+                  No supplements yet
+                </Text>
+                <Text
+                  style={[
+                    styles.suppEmptyBody,
+                    { color: colors.textMuted },
+                  ]}
+                >
+                  Add supplements during onboarding or after a data reset.
+                </Text>
+              </View>
+            ) : null}
+
+            {dailyGroups.map((group, idx) => (
+                <View
+                  key={group.time}
+                  style={[
+                    styles.suppGroup,
+                    idx > 0 && {
+                      borderTopColor: colors.surfaceBorder,
+                      borderTopWidth: 1,
+                      paddingTop: 12,
+                      marginTop: 12,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.suppGroupLabel,
+                      { color: colors.textMuted },
+                    ]}
+                  >
+                    {TIME_OF_DAY_LABEL[group.time]}
+                  </Text>
+                  <View style={{ gap: 8, marginTop: 8 }}>
+                    {group.items.map(({ supplement, takenToday }) => (
+                      <Pressable
+                        key={supplement.id}
+                        onPress={() => handleToggleSupp(supplement.id, today)}
+                        style={({ pressed }) => [
+                          styles.suppRow,
+                          pressed && { opacity: 0.6 },
+                        ]}
+                      >
+                        <Ionicons
+                          name={takenToday ? "checkbox" : "square-outline"}
+                          size={22}
+                          color={
+                            takenToday ? colors.accent : colors.textSubtle
+                          }
+                        />
+                        <Text
+                          style={[
+                            styles.suppItemName,
+                            {
+                              color: takenToday
+                                ? colors.textMuted
+                                : colors.text,
+                              textDecorationLine: takenToday
+                                ? "line-through"
+                                : "none",
+                            },
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {supplement.name}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </View>
+              ))}
+
+            {nonDailyItems.length > 0 ? (
+              <View
+                style={[
+                  styles.countdownBlock,
+                  dailyGroups.length > 0 && {
+                    borderTopColor: colors.surfaceBorder,
+                    borderTopWidth: 1,
+                    paddingTop: 12,
+                    marginTop: 12,
+                  },
+                ]}
+              >
+                {nonDailyItems.map((item) => (
+                  <NonDailySupplementBlock
+                    key={item.supplement.id}
+                    item={item}
+                    today={today}
+                    colors={colors}
+                    styles={styles}
+                    onToggleToday={() =>
+                      handleToggleSupp(item.supplement.id, today)
+                    }
+                    onMarkLate={(date) =>
+                      handleMarkLate(item.supplement.id, date)
+                    }
+                    onDismissMissed={(date) =>
+                      handleDismissMissed(item.supplement.id, date)
+                    }
+                  />
+                ))}
+              </View>
+            ) : null}
+          </View>
         </View>
       </ScrollView>
 
@@ -289,14 +501,12 @@ export default function DashboardScreen() {
         }
       />
 
-      <QuickAddModal
+      <WaterAddModal
         visible={quickAdd?.kind === "water"}
-        title="Add water"
-        placeholder="1"
-        unit={waterUnit}
+        initialUnit={waterUnit}
         colors={colors}
         onCancel={() => setQuickAdd(null)}
-        onConfirm={handleAddWaterCustom}
+        onConfirm={handleAddWaterCustomMl}
       />
     </SafeAreaView>
   );
@@ -304,6 +514,128 @@ export default function DashboardScreen() {
 
 function slotLabel(t: MealType): string {
   return t === "snack" ? "snack" : t;
+}
+
+type DashboardStyles = ReturnType<typeof makeStyles>;
+
+function formatNextDue(
+  date: string,
+  today: string,
+  freq: SupplementFrequency | null,
+): string {
+  const days = daysBetween(today, date);
+  const short = formatShortDate(date);
+  if (freq === "twice_weekly") {
+    const dow = getDayOfWeek(date);
+    const name = DAY_NAMES[dow];
+    if (days <= 0) return `Due today (${name})`;
+    if (days === 1) return `Next: ${name} (tomorrow)`;
+    if (days <= 6) return `Next: ${name}`;
+    return `Next: ${name} (${short})`;
+  }
+  if (days === 0) return "Due today";
+  if (days === 1) return `Due tomorrow (${short})`;
+  return `Due in ${days} days (${short})`;
+}
+
+function NonDailySupplementBlock(props: {
+  item: DashboardSupplement;
+  today: string;
+  colors: Palette;
+  styles: DashboardStyles;
+  onToggleToday: () => void;
+  onMarkLate: (date: string) => void;
+  onDismissMissed: (date: string) => void;
+}) {
+  const { item, today, colors, styles, onToggleToday, onMarkLate, onDismissMissed } = props;
+  const { supplement, todayScheduled, takenToday, missedDates, nextScheduledDate } = item;
+  const freqLabel = supplement.frequency
+    ? SUPPLEMENT_FREQUENCY_LABEL[supplement.frequency]
+    : "";
+
+  return (
+    <View style={styles.nonDailyBlock}>
+      <Text style={[styles.nonDailyName, { color: colors.text }]}>
+        {supplement.name}{" "}
+        <Text style={{ color: colors.textMuted, fontWeight: "600", fontSize: 13 }}>
+          ({freqLabel})
+        </Text>
+      </Text>
+
+      {missedDates.map((d) => (
+        <View
+          key={`missed-${d}`}
+          style={[
+            styles.missedRow,
+            { backgroundColor: "#FEF2F2", borderColor: "#FCA5A5" },
+          ]}
+        >
+          <Ionicons name="alert-circle" size={16} color="#DC2626" />
+          <Text style={styles.missedText}>Missed on {formatShortDate(d)}</Text>
+          <Pressable
+            onPress={() => onMarkLate(d)}
+            hitSlop={6}
+            style={({ pressed }) => pressed && { opacity: 0.6 }}
+          >
+            <Text style={[styles.missedAction, { color: colors.accent }]}>
+              Mark taken
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => onDismissMissed(d)}
+            hitSlop={6}
+            style={({ pressed }) => pressed && { opacity: 0.6 }}
+          >
+            <Text style={[styles.missedAction, { color: colors.textMuted }]}>
+              Dismiss
+            </Text>
+          </Pressable>
+        </View>
+      ))}
+
+      {todayScheduled ? (
+        <Pressable
+          onPress={onToggleToday}
+          style={({ pressed }) => [
+            styles.countdownRow,
+            pressed && { opacity: 0.6 },
+          ]}
+        >
+          <Ionicons
+            name={takenToday ? "checkbox" : "square-outline"}
+            size={22}
+            color={takenToday ? colors.accent : colors.textSubtle}
+          />
+          <View style={{ flex: 1 }}>
+            <Text
+              style={[
+                styles.suppItemName,
+                {
+                  color: takenToday ? colors.textMuted : colors.text,
+                  textDecorationLine: takenToday ? "line-through" : "none",
+                },
+              ]}
+              numberOfLines={1}
+            >
+              {takenToday ? "Done today" : "Due today"}
+            </Text>
+            {takenToday && nextScheduledDate ? (
+              <Text style={[styles.countdownMeta, { color: colors.textMuted }]}>
+                {formatNextDue(nextScheduledDate, today, supplement.frequency)}
+              </Text>
+            ) : null}
+          </View>
+        </Pressable>
+      ) : nextScheduledDate ? (
+        <View style={styles.countdownRow}>
+          <Ionicons name="time-outline" size={22} color={colors.textSubtle} />
+          <Text style={[styles.countdownMeta, { color: colors.textMuted, flex: 1 }]}>
+            {formatNextDue(nextScheduledDate, today, supplement.frequency)}
+          </Text>
+        </View>
+      ) : null}
+    </View>
+  );
 }
 
 const makeStyles = (c: Palette) =>
@@ -366,6 +698,55 @@ const makeStyles = (c: Palette) =>
       letterSpacing: 0.5,
     },
     slotList: { gap: 10 },
+
+    suppsCard: {
+      borderRadius: 14,
+      padding: 16,
+      borderWidth: 1,
+    },
+    suppGroup: {},
+    suppGroupLabel: {
+      fontSize: 12,
+      fontWeight: "700",
+      textTransform: "uppercase",
+      letterSpacing: 0.5,
+    },
+    suppRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      paddingVertical: 4,
+    },
+    suppItemName: { fontSize: 14, fontWeight: "600", flex: 1 },
+    suppHeaderRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+    },
+    countdownBlock: { gap: 10 },
+    countdownRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      paddingVertical: 4,
+    },
+    countdownMeta: { fontSize: 12, marginTop: 2, fontWeight: "600" },
+    suppEmpty: { alignItems: "center", gap: 6, paddingVertical: 10 },
+    suppEmptyTitle: { fontSize: 14, fontWeight: "700" },
+    suppEmptyBody: { fontSize: 12, textAlign: "center" },
+    nonDailyBlock: { gap: 8, paddingVertical: 4 },
+    nonDailyName: { fontSize: 15, fontWeight: "700" },
+    missedRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      borderRadius: 10,
+      borderWidth: 1,
+    },
+    missedText: { flex: 1, fontSize: 13, fontWeight: "600", color: "#DC2626" },
+    missedAction: { fontSize: 12, fontWeight: "700" },
 
     fab: {
       position: "absolute",

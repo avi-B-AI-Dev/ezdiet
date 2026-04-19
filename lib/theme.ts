@@ -1,5 +1,3 @@
-import { useColorScheme } from "react-native";
-
 export type Palette = {
   background: string;
   surface: string;
@@ -42,10 +40,5 @@ export type Theme = {
 };
 
 export function useTheme(): Theme {
-  const scheme = useColorScheme();
-  const mode = scheme === "dark" ? "dark" : "light";
-  return {
-    mode,
-    colors: mode === "dark" ? darkPalette : lightPalette,
-  };
+  return { mode: "light", colors: lightPalette };
 }

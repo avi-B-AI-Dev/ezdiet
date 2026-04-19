@@ -23,6 +23,12 @@ CREATE TABLE IF NOT EXISTS users (
   timeframe_weeks INTEGER,
   activity_level TEXT,
   composition_goal TEXT,
+  diet_style TEXT,
+  protein_pct REAL,
+  carbs_pct REAL,
+  fat_pct REAL,
+  household_code TEXT,
+  min_calories INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -107,19 +113,25 @@ CREATE TABLE IF NOT EXISTS supplements (
   carbs REAL NOT NULL DEFAULT 0,
   fat REAL NOT NULL DEFAULT 0,
   micronutrients TEXT,
+  frequency TEXT,
+  time_of_day TEXT,
+  start_date TEXT,
+  twice_weekly_days TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS supplement_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   supplement_id INTEGER NOT NULL REFERENCES supplements(id) ON DELETE CASCADE,
+  scheduled_date TEXT,
+  taken_at TEXT,
+  status TEXT DEFAULT 'taken',
   logged_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS water_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  amount REAL NOT NULL,
-  unit TEXT NOT NULL CHECK (unit IN ('glasses','oz','liters')),
+  amount_ml REAL NOT NULL,
   logged_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -142,9 +154,57 @@ const USER_MIGRATIONS: string[] = [
   "ALTER TABLE users ADD COLUMN timeframe_weeks INTEGER",
   "ALTER TABLE users ADD COLUMN activity_level TEXT",
   "ALTER TABLE users ADD COLUMN composition_goal TEXT",
+  "ALTER TABLE users ADD COLUMN diet_style TEXT",
+  "ALTER TABLE users ADD COLUMN protein_pct REAL",
+  "ALTER TABLE users ADD COLUMN carbs_pct REAL",
+  "ALTER TABLE users ADD COLUMN fat_pct REAL",
+  "ALTER TABLE users ADD COLUMN household_code TEXT",
+  "ALTER TABLE supplements ADD COLUMN frequency TEXT",
+  "ALTER TABLE supplements ADD COLUMN time_of_day TEXT",
+  "ALTER TABLE supplements ADD COLUMN start_date TEXT",
+  "ALTER TABLE supplements ADD COLUMN twice_weekly_days TEXT",
+  "ALTER TABLE supplement_log ADD COLUMN scheduled_date TEXT",
+  "ALTER TABLE supplement_log ADD COLUMN taken_at TEXT",
+  "ALTER TABLE supplement_log ADD COLUMN status TEXT",
+  "UPDATE supplement_log SET scheduled_date = date(logged_at) WHERE scheduled_date IS NULL",
+  "UPDATE supplement_log SET taken_at = logged_at WHERE taken_at IS NULL",
+  "UPDATE supplement_log SET status = 'taken' WHERE status IS NULL",
+  "ALTER TABLE users ADD COLUMN min_calories INTEGER",
+  "ALTER TABLE users ADD COLUMN water_goal_ml REAL",
+  "UPDATE users SET water_goal_ml = CASE water_unit WHEN 'glasses' THEN water_goal * 237 WHEN 'oz' THEN water_goal * 29.57 WHEN 'liters' THEN water_goal * 1000 ELSE water_goal END WHERE water_goal_ml IS NULL",
 ];
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
+
+async function migrateWaterLogToMl(
+  db: SQLite.SQLiteDatabase,
+): Promise<void> {
+  const cols = await db.getAllAsync<{ name: string }>(
+    "PRAGMA table_info(water_log)",
+  );
+  const hasUnitCol = cols.some((c) => c.name === "unit");
+  if (!hasUnitCol) return;
+  await db.execAsync(`
+    CREATE TABLE water_log_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      amount_ml REAL NOT NULL,
+      logged_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    );
+    INSERT INTO water_log_new (id, amount_ml, logged_at)
+    SELECT id,
+      CASE unit
+        WHEN 'glasses' THEN amount * 237
+        WHEN 'oz' THEN amount * 29.57
+        WHEN 'liters' THEN amount * 1000
+        ELSE amount
+      END,
+      logged_at
+    FROM water_log;
+    DROP TABLE water_log;
+    ALTER TABLE water_log_new RENAME TO water_log;
+    CREATE INDEX IF NOT EXISTS idx_water_log_logged_at ON water_log(logged_at);
+  `);
+}
 
 export function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   if (!dbPromise) {
@@ -157,6 +217,11 @@ export function getDatabase(): Promise<SQLite.SQLiteDatabase> {
         } catch {
           // column already exists — ignore
         }
+      }
+      try {
+        await migrateWaterLogToMl(db);
+      } catch (err) {
+        console.warn("water_log migration failed:", err);
       }
       return db;
     })();

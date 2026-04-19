@@ -1,6 +1,14 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+import DateTimePicker, {
+  DateTimePickerAndroid,
+  type DateTimePickerEvent,
+} from "@react-native-community/datetimepicker";
+import {
+  useFocusEffect,
+  useLocalSearchParams,
+  useRouter,
+} from "expo-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   KeyboardAvoidingView,
@@ -15,29 +23,58 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import {
+  createSupplement,
+  deleteSupplement,
   getUser,
+  listSupplements,
+  parseTwiceWeeklyDays,
   resetDatabase,
   saveOnboardingProfile,
+  serializeTwiceWeeklyDays,
+  SUPPLEMENT_FREQUENCY_LABEL,
+  TIME_OF_DAY_LABEL,
+  updateSupplement,
   updateWaterSettings,
+  type Supplement,
+  type SupplementFrequency,
+  type TimeOfDay,
   type WaterUnit,
 } from "@/lib/db";
+import { DAY_NAMES_SHORT, localDateISO } from "@/lib/date";
 import {
   type ActivityLevel,
   type BmiCategory,
   type CompositionGoal,
+  type DietStyle,
   type Gender,
+  type MacroRatio,
+  ACTIVITY_MULTIPLIERS,
+  DIET_STYLES,
+  MIN_FAT_PER_KG,
+  allowedCompositions,
+  allowedDietStyles,
   bmi,
   bmiCategory,
+  bmr,
+  calorieFloor,
   cmToFtIn,
-  computeMacros,
+  dietStyleLabel,
   ftInToCm,
-  healthyTimelineRangeWeeks,
+  idealWeightRangeKg,
   kgToLbs,
   lbsToKg,
+  macrosFromCaloriesAndRatio,
+  maxWeeklyLossKg,
+  minProteinGramsPerKg,
+  rebalanceFromCalories,
+  rebalanceMacro,
+  requiredCaloriesForRate,
+  tdee,
+  timeframeFromCalories,
   weeklyKgChange,
 } from "@/lib/nutrition";
 import { Palette, useTheme } from "@/lib/theme";
-import { WATER_UNITS } from "@/lib/water-units";
+import { formatWaterAmount, fromMl, toMl, WATER_UNITS } from "@/lib/water-units";
 
 type HeightUnit = "cm" | "ft_in";
 type WeightUnit = "kg" | "lbs";
@@ -88,6 +125,10 @@ export default function ProfileScreen() {
   const { colors } = useTheme();
   const router = useRouter();
   const styles = useMemo(() => makeStyles(colors), [colors]);
+  const params = useLocalSearchParams<{ scrollTo?: string }>();
+  const scrollRef = useRef<ScrollView>(null);
+  const suppSectionYRef = useRef<number | null>(null);
+  const scrolledToSuppRef = useRef(false);
 
   const [name, setName] = useState("");
   const [ageStr, setAgeStr] = useState("30");
@@ -114,6 +155,24 @@ export default function ProfileScreen() {
 
   const [waterUnit, setWaterUnit] = useState<WaterUnit>("glasses");
   const [waterGoalStr, setWaterGoalStr] = useState("8");
+
+  const [dietStyle, setDietStyle] = useState<DietStyle | null>(null);
+  const [proteinPct, setProteinPct] = useState<number | null>(null);
+  const [carbsPct, setCarbsPct] = useState<number | null>(null);
+  const [fatPct, setFatPct] = useState<number | null>(null);
+  const [customProteinStr, setCustomProteinStr] = useState("30");
+  const [customCarbsStr, setCustomCarbsStr] = useState("40");
+  const [customFatStr, setCustomFatStr] = useState("30");
+  const [householdCode, setHouseholdCode] = useState<string | null>(null);
+
+  const [supps, setSupps] = useState<Supplement[]>([]);
+  const [suppFormId, setSuppFormId] = useState<number | "new" | null>(null);
+  const [suppName, setSuppName] = useState("");
+  const [suppFreq, setSuppFreq] = useState<SupplementFrequency>("daily");
+  const [suppTime, setSuppTime] = useState<TimeOfDay>("morning");
+  const [suppStartDate, setSuppStartDate] = useState(new Date());
+  const [suppDays, setSuppDays] = useState<number[]>([]);
+  const [suppShowPicker, setSuppShowPicker] = useState(false);
 
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -148,15 +207,153 @@ export default function ProfileScreen() {
     setFatStr(String(u.daily_fat_goal));
 
     setWaterUnit(u.water_unit);
-    setWaterGoalStr(String(u.water_goal));
+    const ml =
+      u.water_goal_ml ??
+      (u.water_unit === "glasses"
+        ? u.water_goal * 237
+        : u.water_unit === "oz"
+          ? u.water_goal * 29.57
+          : u.water_goal * 1000);
+    setWaterGoalStr(formatWaterAmount(fromMl(ml, u.water_unit), u.water_unit));
+
+    setDietStyle(u.diet_style);
+    setProteinPct(u.protein_pct);
+    setCarbsPct(u.carbs_pct);
+    setFatPct(u.fat_pct);
+    if (u.diet_style === "custom") {
+      setCustomProteinStr(String(u.protein_pct ?? 30));
+      setCustomCarbsStr(String(u.carbs_pct ?? 40));
+      setCustomFatStr(String(u.fat_pct ?? 30));
+    }
+    setHouseholdCode(u.household_code);
     setLoaded(true);
+  }, []);
+
+  const loadSupps = useCallback(async () => {
+    const list = await listSupplements();
+    setSupps(list);
   }, []);
 
   useFocusEffect(
     useCallback(() => {
       if (!loaded) load();
-    }, [load, loaded]),
+      loadSupps();
+      scrolledToSuppRef.current = false;
+      if (
+        params.scrollTo === "supplements" &&
+        suppSectionYRef.current != null
+      ) {
+        scrollRef.current?.scrollTo({
+          y: suppSectionYRef.current,
+          animated: true,
+        });
+        scrolledToSuppRef.current = true;
+      }
+    }, [load, loaded, loadSupps, params.scrollTo]),
   );
+
+  const openAddSuppForm = () => {
+    setSuppFormId("new");
+    setSuppName("");
+    setSuppFreq("daily");
+    setSuppTime("morning");
+    setSuppStartDate(new Date());
+    setSuppDays([]);
+    setSuppShowPicker(false);
+  };
+
+  const openEditSuppForm = (s: Supplement) => {
+    setSuppFormId(s.id);
+    setSuppName(s.name);
+    setSuppFreq(s.frequency ?? "daily");
+    setSuppTime(s.time_of_day ?? "morning");
+    if (s.start_date) {
+      const [y, m, d] = s.start_date.split("-").map(Number);
+      setSuppStartDate(new Date(y, m - 1, d));
+    } else {
+      setSuppStartDate(new Date());
+    }
+    setSuppDays(parseTwiceWeeklyDays(s.twice_weekly_days));
+    setSuppShowPicker(false);
+  };
+
+  const closeSuppForm = () => {
+    setSuppFormId(null);
+    setSuppShowPicker(false);
+  };
+
+  const handleSaveSupp = async () => {
+    if (!suppName.trim() || suppFormId == null) return;
+    if (suppFreq === "twice_weekly" && suppDays.length !== 2) {
+      Alert.alert(
+        "Pick two days",
+        "For a twice-a-week supplement, please select exactly two days of the week.",
+      );
+      return;
+    }
+    const input = {
+      name: suppName.trim(),
+      brand: null,
+      calories: 0,
+      protein: 0,
+      carbs: 0,
+      fat: 0,
+      micronutrients: null,
+      frequency: suppFreq,
+      time_of_day: suppTime,
+      start_date: localDateISO(suppStartDate),
+      twice_weekly_days:
+        suppFreq === "twice_weekly" ? serializeTwiceWeeklyDays(suppDays) : null,
+    };
+    try {
+      if (suppFormId === "new") {
+        await createSupplement(input);
+      } else {
+        await updateSupplement(suppFormId, input);
+      }
+      closeSuppForm();
+      await loadSupps();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      Alert.alert("Could not save supplement", msg);
+    }
+  };
+
+  const handleDeleteSupp = (s: Supplement) => {
+    Alert.alert(
+      `Delete ${s.name}?`,
+      "This removes the supplement from tracking. Past log entries are also deleted.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            await deleteSupplement(s.id);
+            if (suppFormId === s.id) closeSuppForm();
+            await loadSupps();
+          },
+        },
+      ],
+    );
+  };
+
+  const openSuppAndroidPicker = () => {
+    DateTimePickerAndroid.open({
+      value: suppStartDate,
+      mode: "date",
+      onChange: (_e, selected) => {
+        if (selected) setSuppStartDate(selected);
+      },
+    });
+  };
+
+  const onSuppIosDateChange = (
+    _e: DateTimePickerEvent,
+    selected?: Date,
+  ) => {
+    if (selected) setSuppStartDate(selected);
+  };
 
   const heightCm =
     heightUnit === "cm"
@@ -174,25 +371,139 @@ export default function ProfileScreen() {
   const bmiValue = bmi(weightKg, heightCm);
   const bmiCat = bmiCategory(bmiValue);
 
-  const canRecalc =
-    !!gender && !!activity && !!composition && weightKg > 0 && heightCm > 0 && age > 0;
-
-  const handleRecalc = () => {
-    if (!canRecalc || !gender || !activity || !composition) return;
-    const r = computeMacros({
-      weightKg,
-      heightCm,
-      age,
-      gender,
-      activity,
-      composition,
-      weeklyKg,
-    });
-    setCalStr(String(r.calories));
-    setProtStr(String(r.protein));
-    setCarbsStr(String(r.carbs));
-    setFatStr(String(r.fat));
+  const customRatio: MacroRatio = {
+    proteinPct: Number(customProteinStr) || 0,
+    carbsPct: Number(customCarbsStr) || 0,
+    fatPct: Number(customFatStr) || 0,
   };
+  const customTotal =
+    customRatio.proteinPct + customRatio.carbsPct + customRatio.fatPct;
+
+  const effectiveRatio: MacroRatio | null = useMemo(() => {
+    if (dietStyle === "custom") {
+      if (customTotal === 100) return customRatio;
+      if (proteinPct != null && carbsPct != null && fatPct != null) {
+        return { proteinPct, carbsPct, fatPct };
+      }
+      return null;
+    }
+    if (dietStyle) return DIET_STYLES[dietStyle];
+    return null;
+  }, [dietStyle, customRatio, customTotal, proteinPct, carbsPct, fatPct]);
+
+  const availableCompositions = useMemo(
+    () => allowedCompositions(weightKg, goalKg),
+    [weightKg, goalKg],
+  );
+  const availableDietStyles = useMemo(
+    () => allowedDietStyles(composition),
+    [composition],
+  );
+
+  useEffect(() => {
+    if (composition && !availableCompositions.includes(composition)) {
+      setComposition(null);
+    }
+  }, [availableCompositions, composition]);
+
+  const pickComposition = (c: CompositionGoal) => {
+    setComposition(c);
+    if (c === "recomp") {
+      setDietStyle("high_protein");
+    } else if (dietStyle && !allowedDietStyles(c).includes(dietStyle)) {
+      setDietStyle(null);
+    }
+  };
+
+  const minCalories = gender ? calorieFloor(gender, weightKg) : 0;
+  const tdeeValue = useMemo(() => {
+    if (!gender || !activity || weightKg <= 0 || heightCm <= 0 || age <= 0)
+      return 0;
+    return tdee(bmr({ weightKg, heightCm, age, gender }), activity);
+  }, [gender, activity, weightKg, heightCm, age]);
+  const maxLossKg = tdeeValue > 0 ? maxWeeklyLossKg(tdeeValue, minCalories) : 0;
+  const ideal = idealWeightRangeKg(heightCm);
+
+  const formatWeightVal = (kg: number) =>
+    weightUnit === "kg" ? kg.toFixed(1) : String(Math.round(kgToLbs(kg)));
+
+  const handleCaloriesChange = (v: string) => {
+    const clean = v.replace(/[^0-9]/g, "");
+    setCalStr(clean);
+    if (!effectiveRatio || !composition) return;
+    const cal = Number(clean) || 0;
+    const m = rebalanceFromCalories(cal, effectiveRatio, weightKg, composition);
+    setProtStr(String(m.protein));
+    setCarbsStr(String(m.carbs));
+    setFatStr(String(m.fat));
+    if (tdeeValue > 0) {
+      const tf = timeframeFromCalories(tdeeValue, cal, weightKg, goalKg);
+      if (tf != null) setTimeframeStr(String(tf));
+    }
+  };
+
+  const handleMacroChange = (
+    which: "protein" | "carbs" | "fat",
+    v: string,
+  ) => {
+    const clean = v.replace(/[^0-9]/g, "");
+    if (which === "protein") setProtStr(clean);
+    else if (which === "carbs") setCarbsStr(clean);
+    else setFatStr(clean);
+    if (!effectiveRatio) return;
+    const current = {
+      calories: Number(calStr) || 0,
+      protein: Number(protStr) || 0,
+      carbs: Number(carbsStr) || 0,
+      fat: Number(fatStr) || 0,
+    };
+    const newVal = Number(clean) || 0;
+    const m = rebalanceMacro(current, which, newVal, effectiveRatio);
+    if (which !== "protein") setProtStr(String(m.protein));
+    if (which !== "carbs") setCarbsStr(String(m.carbs));
+    if (which !== "fat") setFatStr(String(m.fat));
+  };
+
+  const handlePickDietStyle = (style: DietStyle) => {
+    setDietStyle(style);
+    const ratio =
+      style === "custom"
+        ? { proteinPct: Number(customProteinStr) || 0, carbsPct: Number(customCarbsStr) || 0, fatPct: Number(customFatStr) || 0 }
+        : DIET_STYLES[style];
+    if (style !== "custom") {
+      setProteinPct(ratio.proteinPct);
+      setCarbsPct(ratio.carbsPct);
+      setFatPct(ratio.fatPct);
+    }
+    if (!composition) return;
+    const cal = Number(calStr) || 0;
+    if (cal <= 0) return;
+    const m = rebalanceFromCalories(cal, ratio, weightKg, composition);
+    setProtStr(String(m.protein));
+    setCarbsStr(String(m.carbs));
+    setFatStr(String(m.fat));
+  };
+
+  const liveAdjustment = useMemo(() => {
+    if (!effectiveRatio || !composition) return null;
+    const cal = Number(calStr) || 0;
+    if (cal <= 0 || weightKg <= 0) return null;
+    return macrosFromCaloriesAndRatio(cal, effectiveRatio, weightKg, composition);
+  }, [effectiveRatio, composition, calStr, weightKg]);
+
+  const customMinProteinG = weightKg * minProteinGramsPerKg(composition ?? "lose_fat");
+  const customMinFatG = weightKg * MIN_FAT_PER_KG;
+  const customCalNum = Number(calStr) || 0;
+  const customMinProteinPct =
+    customCalNum > 0 ? Math.ceil((customMinProteinG * 4 * 100) / customCalNum) : 0;
+  const customMinFatPct =
+    customCalNum > 0 ? Math.ceil((customMinFatG * 9 * 100) / customCalNum) : 0;
+  const customProteinPctNum = Number(customProteinStr) || 0;
+  const customFatPctNum = Number(customFatStr) || 0;
+  const customProteinBelow =
+    dietStyle === "custom" && customProteinPctNum < customMinProteinPct;
+  const customFatBelow =
+    dietStyle === "custom" && customFatPctNum < customMinFatPct;
 
   const toggleHeightUnit = () => {
     if (heightUnit === "ft_in") {
@@ -250,8 +561,16 @@ export default function ProfileScreen() {
         daily_protein_goal: Number(protStr) || 0,
         daily_carbs_goal: Number(carbsStr) || 0,
         daily_fat_goal: Number(fatStr) || 0,
+        diet_style: dietStyle,
+        protein_pct: effectiveRatio?.proteinPct ?? proteinPct,
+        carbs_pct: effectiveRatio?.carbsPct ?? carbsPct,
+        fat_pct: effectiveRatio?.fatPct ?? fatPct,
+        household_code: householdCode,
       });
-      await updateWaterSettings(waterUnit, Number(waterGoalStr) || 0);
+      await updateWaterSettings(
+        waterUnit,
+        toMl(Number(waterGoalStr) || 0, waterUnit),
+      );
       setSavedAt(Date.now());
     } finally {
       setSaving(false);
@@ -276,8 +595,6 @@ export default function ProfileScreen() {
     );
   };
 
-  const losingTooFast = weeklyKg > 1;
-  const healthy = healthyTimelineRangeWeeks(weightKg, goalKg);
   const weeklyDisplay =
     weightUnit === "kg"
       ? `${weeklyKg.toFixed(2)} kg/week`
@@ -290,6 +607,7 @@ export default function ProfileScreen() {
         style={styles.flex}
       >
         <ScrollView
+          ref={scrollRef}
           contentContainerStyle={styles.scroll}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
@@ -457,6 +775,13 @@ export default function ProfileScreen() {
                 </View>
               </View>
             ) : null}
+            {heightCm > 0 ? (
+              <Text style={styles.hintText}>
+                Based on your height, your ideal weight range is{" "}
+                {formatWeightVal(ideal.minKg)}–{formatWeightVal(ideal.maxKg)}{" "}
+                {weightUnit}.
+              </Text>
+            ) : null}
           </View>
 
           {/* Goal */}
@@ -502,23 +827,38 @@ export default function ProfileScreen() {
                 {weeklyKg === 0 ? "—" : weeklyDisplay}
               </Text>
             </View>
-            {losingTooFast ? (
-              <View style={styles.warnCard}>
-                <Ionicons name="warning" size={18} color="#F59E0B" />
+            {tdeeValue > 0 ? (
+              <Text style={styles.hintText}>
+                Your fastest safe weight loss rate is{" "}
+                {weightUnit === "kg"
+                  ? `${maxLossKg.toFixed(2)} kg/week`
+                  : `${kgToLbs(maxLossKg).toFixed(1)} lbs/week`}
+                .
+              </Text>
+            ) : null}
+            {tdeeValue > 0 && weeklyKg > 0 &&
+            requiredCaloriesForRate(tdeeValue, weeklyKg) < minCalories ? (
+              <View
+                style={[
+                  styles.warnCard,
+                  { borderColor: "#EF4444" },
+                ]}
+              >
+                <Ionicons name="warning" size={18} color="#EF4444" />
                 <View style={{ flex: 1, gap: 4 }}>
-                  <Text style={styles.warnTitle}>That&apos;s a fast pace</Text>
+                  <Text style={styles.warnTitle}>Too fast</Text>
                   <Text style={styles.warnBody}>
-                    Losing more than 1kg/week is not recommended.
-                    {healthy
-                      ? ` A healthy timeline would be ${healthy.minWeeks}-${healthy.maxWeeks} weeks.`
-                      : ""}
+                    This would require eating below your minimum safe calories
+                    of {minCalories} cal. Try a longer timeframe.
                   </Text>
                 </View>
               </View>
             ) : null}
             <View style={{ gap: 8 }}>
               <Text style={styles.subLabel}>Composition goal</Text>
-              {COMPOSITION_OPTIONS.map((opt) => (
+              {COMPOSITION_OPTIONS.filter((opt) =>
+                availableCompositions.includes(opt.value),
+              ).map((opt) => (
                 <OptionRadio
                   key={opt.value}
                   colors={colors}
@@ -526,7 +866,7 @@ export default function ProfileScreen() {
                   title={opt.title}
                   description={opt.description}
                   active={composition === opt.value}
-                  onPress={() => setComposition(opt.value)}
+                  onPress={() => pickComposition(opt.value)}
                 />
               ))}
             </View>
@@ -550,33 +890,118 @@ export default function ProfileScreen() {
             </View>
           </View>
 
+          {/* Diet style */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Diet style</Text>
+            <View style={{ gap: 8 }}>
+              {(["balanced", "high_protein", "keto", "low_carb", "custom"] as DietStyle[])
+                .filter((s) => availableDietStyles.includes(s))
+                .map((style) => (
+                  <OptionRadio
+                    key={style}
+                    colors={colors}
+                    styles={styles}
+                    title={dietStyleLabel(style)}
+                    description={
+                      style === "custom"
+                        ? "Set your own protein / carbs / fat split"
+                        : DIET_STYLES[style].description
+                    }
+                    active={dietStyle === style}
+                    onPress={() => handlePickDietStyle(style)}
+                  />
+                ))}
+            </View>
+            {dietStyle === "custom" ? (
+              <View style={styles.field}>
+                <Text style={styles.label}>Custom ratio (total must be 100%)</Text>
+                <View style={styles.customRatioRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.customRatioLabel}>Protein</Text>
+                    <View style={styles.inputRow}>
+                      <TextInput
+                        style={styles.numInput}
+                        value={customProteinStr}
+                        onChangeText={(v) =>
+                          setCustomProteinStr(v.replace(/[^0-9]/g, ""))
+                        }
+                        keyboardType="number-pad"
+                        maxLength={3}
+                        selectionColor={colors.accent}
+                      />
+                      <Text style={styles.inputUnit}>%</Text>
+                    </View>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.customRatioLabel}>Carbs</Text>
+                    <View style={styles.inputRow}>
+                      <TextInput
+                        style={styles.numInput}
+                        value={customCarbsStr}
+                        onChangeText={(v) =>
+                          setCustomCarbsStr(v.replace(/[^0-9]/g, ""))
+                        }
+                        keyboardType="number-pad"
+                        maxLength={3}
+                        selectionColor={colors.accent}
+                      />
+                      <Text style={styles.inputUnit}>%</Text>
+                    </View>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.customRatioLabel}>Fat</Text>
+                    <View style={styles.inputRow}>
+                      <TextInput
+                        style={styles.numInput}
+                        value={customFatStr}
+                        onChangeText={(v) =>
+                          setCustomFatStr(v.replace(/[^0-9]/g, ""))
+                        }
+                        keyboardType="number-pad"
+                        maxLength={3}
+                        selectionColor={colors.accent}
+                      />
+                      <Text style={styles.inputUnit}>%</Text>
+                    </View>
+                  </View>
+                </View>
+                <View style={styles.totalRow}>
+                  <Text style={styles.totalLabel}>Total</Text>
+                  <Text
+                    style={[
+                      styles.totalValue,
+                      { color: customTotal === 100 ? "#22C55E" : "#EF4444" },
+                    ]}
+                  >
+                    {customTotal}%
+                  </Text>
+                </View>
+                {customProteinBelow && customCalNum > 0 ? (
+                  <Text style={{ color: "#F59E0B", fontSize: 12, marginTop: 4 }}>
+                    Minimum protein: {Math.round(customMinProteinG)} g
+                    {customMinProteinPct ? ` (≈ ${customMinProteinPct}%)` : ""}
+                  </Text>
+                ) : null}
+                {customFatBelow && customCalNum > 0 ? (
+                  <Text style={{ color: "#F59E0B", fontSize: 12, marginTop: 2 }}>
+                    Minimum fat: {Math.round(customMinFatG)} g
+                    {customMinFatPct ? ` (≈ ${customMinFatPct}%)` : ""}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
+          </View>
+
           {/* Daily targets */}
           <View style={styles.section}>
-            <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionTitle}>Daily targets</Text>
-              <Pressable
-                onPress={handleRecalc}
-                disabled={!canRecalc}
-                style={({ pressed }) => [
-                  styles.recalcBtn,
-                  { borderColor: colors.accent },
-                  !canRecalc && { opacity: 0.4 },
-                  pressed && { opacity: 0.6 },
-                ]}
-              >
-                <Ionicons name="refresh" size={14} color={colors.accent} />
-                <Text style={[styles.recalcBtnText, { color: colors.accent }]}>
-                  Recalculate
-                </Text>
-              </Pressable>
-            </View>
+            <Text style={styles.sectionTitle}>Daily targets</Text>
             <View style={styles.field}>
               <Text style={styles.label}>Daily Calories</Text>
               <View style={styles.inputRow}>
                 <TextInput
                   style={styles.numInput}
                   value={calStr}
-                  onChangeText={(v) => setCalStr(v.replace(/[^0-9]/g, ""))}
+                  onChangeText={handleCaloriesChange}
                   keyboardType="number-pad"
                   maxLength={5}
                   selectionColor={colors.accent}
@@ -590,7 +1015,7 @@ export default function ProfileScreen() {
                 <TextInput
                   style={styles.numInput}
                   value={protStr}
-                  onChangeText={(v) => setProtStr(v.replace(/[^0-9]/g, ""))}
+                  onChangeText={(v) => handleMacroChange("protein", v)}
                   keyboardType="number-pad"
                   maxLength={4}
                   selectionColor={colors.accent}
@@ -604,7 +1029,7 @@ export default function ProfileScreen() {
                 <TextInput
                   style={styles.numInput}
                   value={carbsStr}
-                  onChangeText={(v) => setCarbsStr(v.replace(/[^0-9]/g, ""))}
+                  onChangeText={(v) => handleMacroChange("carbs", v)}
                   keyboardType="number-pad"
                   maxLength={4}
                   selectionColor={colors.accent}
@@ -618,7 +1043,7 @@ export default function ProfileScreen() {
                 <TextInput
                   style={styles.numInput}
                   value={fatStr}
-                  onChangeText={(v) => setFatStr(v.replace(/[^0-9]/g, ""))}
+                  onChangeText={(v) => handleMacroChange("fat", v)}
                   keyboardType="number-pad"
                   maxLength={4}
                   selectionColor={colors.accent}
@@ -626,6 +1051,37 @@ export default function ProfileScreen() {
                 <Text style={styles.inputUnit}>g</Text>
               </View>
             </View>
+            {liveAdjustment?.insufficient ? (
+              <View style={[styles.warnCard, { borderColor: "#EF4444" }]}>
+                <Ionicons name="warning" size={18} color="#EF4444" />
+                <View style={{ flex: 1, gap: 4 }}>
+                  <Text style={styles.warnTitle}>Calorie target too low</Text>
+                  <Text style={styles.warnBody}>
+                    Your calorie target is too low for this diet at your weight.
+                  </Text>
+                </View>
+              </View>
+            ) : liveAdjustment?.adjusted ? (
+              <Text style={styles.hintText}>
+                Adjusted to meet your minimum protein/fat needs.
+              </Text>
+            ) : null}
+            {minCalories > 0 && (Number(calStr) || 0) > 0 &&
+            (Number(calStr) || 0) < minCalories ? (
+              <View style={[styles.warnCard, { borderColor: "#EF4444" }]}>
+                <Ionicons name="warning" size={18} color="#EF4444" />
+                <View style={{ flex: 1, gap: 4 }}>
+                  <Text style={styles.warnTitle}>Below minimum</Text>
+                  <Text style={styles.warnBody}>
+                    {Number(calStr)} cal is below your minimum safe intake of{" "}
+                    {minCalories} cal.
+                    {tdeeValue > 0 && weightKg > goalKg && maxLossKg > 0
+                      ? ` At minimum intake, you'd reach your goal in ${Math.ceil((weightKg - goalKg) / maxLossKg)} weeks.`
+                      : ""}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
           </View>
 
           {/* Water */}
@@ -639,7 +1095,17 @@ export default function ProfileScreen() {
                   return (
                     <Pressable
                       key={u}
-                      onPress={() => setWaterUnit(u)}
+                      onPress={() => {
+                        if (u === waterUnit) return;
+                        const currentMl = toMl(
+                          Number(waterGoalStr) || 0,
+                          waterUnit,
+                        );
+                        setWaterGoalStr(
+                          formatWaterAmount(fromMl(currentMl, u), u),
+                        );
+                        setWaterUnit(u);
+                      }}
                       style={({ pressed }) => [
                         styles.chip,
                         {
@@ -687,6 +1153,45 @@ export default function ProfileScreen() {
             </View>
           ) : null}
 
+          <View
+            onLayout={(e) => {
+              const y = e.nativeEvent.layout.y;
+              suppSectionYRef.current = y;
+              if (
+                params.scrollTo === "supplements" &&
+                !scrolledToSuppRef.current
+              ) {
+                scrolledToSuppRef.current = true;
+                scrollRef.current?.scrollTo({ y, animated: true });
+              }
+            }}
+          >
+            <SupplementsSection
+              colors={colors}
+              styles={styles}
+              supps={supps}
+              suppFormId={suppFormId}
+              suppName={suppName}
+              setSuppName={setSuppName}
+              suppFreq={suppFreq}
+              setSuppFreq={setSuppFreq}
+              suppTime={suppTime}
+              setSuppTime={setSuppTime}
+              suppStartDate={suppStartDate}
+              suppDays={suppDays}
+              setSuppDays={setSuppDays}
+              showPicker={suppShowPicker}
+              setShowPicker={setSuppShowPicker}
+              onAdd={openAddSuppForm}
+              onEdit={openEditSuppForm}
+              onDelete={handleDeleteSupp}
+              onCancel={closeSuppForm}
+              onSave={handleSaveSupp}
+              openAndroidPicker={openSuppAndroidPicker}
+              onIosDateChange={onSuppIosDateChange}
+            />
+          </View>
+
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Danger zone</Text>
             <Pressable
@@ -719,6 +1224,362 @@ export default function ProfileScreen() {
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
+  );
+}
+
+function SupplementsSection(props: {
+  colors: Palette;
+  styles: Styles;
+  supps: Supplement[];
+  suppFormId: number | "new" | null;
+  suppName: string;
+  setSuppName: (s: string) => void;
+  suppFreq: SupplementFrequency;
+  setSuppFreq: (f: SupplementFrequency) => void;
+  suppTime: TimeOfDay;
+  setSuppTime: (t: TimeOfDay) => void;
+  suppStartDate: Date;
+  suppDays: number[];
+  setSuppDays: (d: number[]) => void;
+  showPicker: boolean;
+  setShowPicker: (b: boolean) => void;
+  onAdd: () => void;
+  onEdit: (s: Supplement) => void;
+  onDelete: (s: Supplement) => void;
+  onCancel: () => void;
+  onSave: () => void;
+  openAndroidPicker: () => void;
+  onIosDateChange: (e: DateTimePickerEvent, d?: Date) => void;
+}) {
+  const {
+    colors,
+    styles,
+    supps,
+    suppFormId,
+    suppName,
+    setSuppName,
+    suppFreq,
+    setSuppFreq,
+    suppTime,
+    setSuppTime,
+    suppStartDate,
+    suppDays,
+    setSuppDays,
+    showPicker,
+    setShowPicker,
+    onAdd,
+    onEdit,
+    onDelete,
+    onCancel,
+    onSave,
+    openAndroidPicker,
+    onIosDateChange,
+  } = props;
+
+  const FREQS: SupplementFrequency[] = [
+    "daily",
+    "twice_weekly",
+    "weekly",
+    "biweekly",
+    "monthly",
+  ];
+  const TIMES: TimeOfDay[] = ["morning", "afternoon", "evening", "with_meal"];
+
+  return (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>Supplements &amp; Medications</Text>
+
+      {supps.length === 0 && suppFormId == null ? (
+        <View
+          style={[
+            styles.field,
+            { alignItems: "center", paddingVertical: 16 },
+          ]}
+        >
+          <Text
+            style={{
+              color: colors.textMuted,
+              fontSize: 13,
+              textAlign: "center",
+            }}
+          >
+            No supplements yet.
+          </Text>
+        </View>
+      ) : null}
+
+      {supps.map((s) =>
+        suppFormId === s.id ? null : (
+          <View
+            key={s.id}
+            style={[
+              styles.suppListCard,
+              {
+                backgroundColor: colors.surface,
+                borderColor: colors.surfaceBorder,
+              },
+            ]}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.suppListName, { color: colors.text }]}>
+                {s.name}
+              </Text>
+              <Text
+                style={[styles.suppListMeta, { color: colors.textMuted }]}
+              >
+                {s.frequency ? SUPPLEMENT_FREQUENCY_LABEL[s.frequency] : "—"}
+                {" · "}
+                {s.time_of_day ? TIME_OF_DAY_LABEL[s.time_of_day] : "—"}
+                {s.start_date ? ` · starts ${s.start_date}` : ""}
+              </Text>
+            </View>
+            <Pressable
+              onPress={() => onEdit(s)}
+              hitSlop={8}
+              style={({ pressed }) => [
+                styles.iconBtn,
+                pressed && { opacity: 0.5 },
+              ]}
+            >
+              <Ionicons
+                name="create-outline"
+                size={20}
+                color={colors.textMuted}
+              />
+            </Pressable>
+            <Pressable
+              onPress={() => onDelete(s)}
+              hitSlop={8}
+              style={({ pressed }) => [
+                styles.iconBtn,
+                pressed && { opacity: 0.5 },
+              ]}
+            >
+              <Ionicons name="trash-outline" size={20} color="#EF4444" />
+            </Pressable>
+          </View>
+        ),
+      )}
+
+      {suppFormId != null ? (
+        <View style={{ gap: 10 }}>
+          <View style={styles.field}>
+            <Text style={styles.label}>Name</Text>
+            <TextInput
+              style={styles.textInput}
+              value={suppName}
+              onChangeText={setSuppName}
+              placeholder="e.g. Multivitamin"
+              placeholderTextColor={colors.placeholder}
+              selectionColor={colors.accent}
+              maxLength={60}
+              autoFocus
+            />
+          </View>
+          <View style={styles.field}>
+            <Text style={styles.label}>Frequency</Text>
+            <View style={styles.chipRow}>
+              {FREQS.map((f) => {
+                const active = suppFreq === f;
+                return (
+                  <Pressable
+                    key={f}
+                    onPress={() => setSuppFreq(f)}
+                    style={({ pressed }) => [
+                      styles.chip,
+                      {
+                        borderColor: active ? colors.accent : colors.surfaceBorder,
+                        backgroundColor: active ? colors.accent : "transparent",
+                      },
+                      pressed && { opacity: 0.7 },
+                    ]}
+                  >
+                    <Text
+                      style={{
+                        color: active ? colors.accentText : colors.text,
+                        fontWeight: "600",
+                        fontSize: 13,
+                      }}
+                    >
+                      {SUPPLEMENT_FREQUENCY_LABEL[f]}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+          <View style={styles.field}>
+            <Text style={styles.label}>Time of day</Text>
+            <View style={styles.chipRow}>
+              {TIMES.map((t) => {
+                const active = suppTime === t;
+                return (
+                  <Pressable
+                    key={t}
+                    onPress={() => setSuppTime(t)}
+                    style={({ pressed }) => [
+                      styles.chip,
+                      {
+                        borderColor: active ? colors.accent : colors.surfaceBorder,
+                        backgroundColor: active ? colors.accent : "transparent",
+                      },
+                      pressed && { opacity: 0.7 },
+                    ]}
+                  >
+                    <Text
+                      style={{
+                        color: active ? colors.accentText : colors.text,
+                        fontWeight: "600",
+                        fontSize: 13,
+                      }}
+                    >
+                      {TIME_OF_DAY_LABEL[t]}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+          {suppFreq === "twice_weekly" ? (
+            <View style={styles.field}>
+              <Text style={styles.label}>Which two days?</Text>
+              <View style={styles.chipRow}>
+                {DAY_NAMES_SHORT.map((name, idx) => {
+                  const active = suppDays.includes(idx);
+                  return (
+                    <Pressable
+                      key={idx}
+                      onPress={() => {
+                        if (active) {
+                          setSuppDays(suppDays.filter((d) => d !== idx));
+                        } else if (suppDays.length < 2) {
+                          setSuppDays([...suppDays, idx]);
+                        } else {
+                          setSuppDays([suppDays[1], idx]);
+                        }
+                      }}
+                      style={({ pressed }) => [
+                        styles.chip,
+                        {
+                          borderColor: active
+                            ? colors.accent
+                            : colors.surfaceBorder,
+                          backgroundColor: active
+                            ? colors.accent
+                            : "transparent",
+                        },
+                        pressed && { opacity: 0.7 },
+                      ]}
+                    >
+                      <Text
+                        style={{
+                          color: active ? colors.accentText : colors.text,
+                          fontWeight: "600",
+                          fontSize: 13,
+                        }}
+                      >
+                        {name}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              {suppDays.length !== 2 ? (
+                <Text
+                  style={{
+                    color: colors.textMuted,
+                    fontSize: 12,
+                    marginTop: 6,
+                  }}
+                >
+                  Pick exactly 2 days.
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+          <View style={styles.field}>
+            <Text style={styles.label}>Start date</Text>
+            <Pressable
+              onPress={() => {
+                if (Platform.OS === "android") openAndroidPicker();
+                else setShowPicker(true);
+              }}
+              style={({ pressed }) => [
+                styles.suppDateBtn,
+                { borderColor: colors.surfaceBorder },
+                pressed && { opacity: 0.7 },
+              ]}
+            >
+              <Ionicons
+                name="calendar-outline"
+                size={16}
+                color={colors.textMuted}
+              />
+              <Text style={{ color: colors.text, fontWeight: "600" }}>
+                {suppStartDate.toLocaleDateString()}
+              </Text>
+            </Pressable>
+            {Platform.OS === "ios" && showPicker ? (
+              <View style={{ marginTop: 8 }}>
+                <DateTimePicker
+                  value={suppStartDate}
+                  mode="date"
+                  display="inline"
+                  onChange={onIosDateChange}
+                  themeVariant="light"
+                />
+              </View>
+            ) : null}
+          </View>
+          <View style={styles.suppFormActions}>
+            <Pressable
+              onPress={onCancel}
+              style={({ pressed }) => [
+                styles.suppCancelBtn,
+                { borderColor: colors.surfaceBorder },
+                pressed && { opacity: 0.6 },
+              ]}
+            >
+              <Text
+                style={{ color: colors.textMuted, fontWeight: "600" }}
+              >
+                Cancel
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={onSave}
+              disabled={!suppName.trim()}
+              style={({ pressed }) => [
+                styles.suppSaveBtn,
+                { backgroundColor: colors.accent },
+                !suppName.trim() && { opacity: 0.4 },
+                pressed && { opacity: 0.85 },
+              ]}
+            >
+              <Text
+                style={{ color: colors.accentText, fontWeight: "700" }}
+              >
+                {suppFormId === "new" ? "Add supplement" : "Save changes"}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : (
+        <Pressable
+          onPress={onAdd}
+          style={({ pressed }) => [
+            styles.addSuppBtn,
+            { borderColor: colors.accent },
+            pressed && { opacity: 0.7 },
+          ]}
+        >
+          <Ionicons name="add" size={18} color={colors.accent} />
+          <Text style={{ color: colors.accent, fontWeight: "700" }}>
+            Add supplement
+          </Text>
+        </Pressable>
+      )}
+    </View>
   );
 }
 
@@ -921,6 +1782,76 @@ const makeStyles = (c: Palette) =>
       gap: 6,
       alignSelf: "flex-start",
     },
+
+    suppListCard: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      borderRadius: 14,
+      padding: 14,
+      borderWidth: 1,
+    },
+    suppListName: { fontSize: 15, fontWeight: "700" },
+    suppListMeta: { fontSize: 12, marginTop: 2 },
+    iconBtn: { padding: 4 },
+    addSuppBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      paddingVertical: 14,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderStyle: "dashed",
+    },
+    suppDateBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      borderRadius: 10,
+      borderWidth: 1,
+      alignSelf: "flex-start",
+    },
+    suppFormActions: {
+      flexDirection: "row",
+      gap: 10,
+      justifyContent: "flex-end",
+    },
+    suppCancelBtn: {
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderRadius: 10,
+      borderWidth: 1,
+    },
+    suppSaveBtn: {
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderRadius: 10,
+    },
+
+    hintText: { color: c.textMuted, fontSize: 13, lineHeight: 18 },
+    customRatioRow: { flexDirection: "row", gap: 10, marginTop: 4 },
+    customRatioLabel: {
+      color: c.textMuted,
+      fontSize: 11,
+      fontWeight: "600",
+      marginBottom: 4,
+      textTransform: "uppercase",
+      letterSpacing: 0.5,
+    },
+    totalRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginTop: 10,
+      paddingTop: 10,
+      borderTopWidth: 1,
+      borderTopColor: c.surfaceBorder,
+    },
+    totalLabel: { color: c.textMuted, fontSize: 12, fontWeight: "700" },
+    totalValue: { fontSize: 16, fontWeight: "800" },
 
     dangerBtn: {
       flexDirection: "row",

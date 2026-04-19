@@ -3,11 +3,12 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import type { WaterUnit } from "@/lib/db";
 import type { Palette } from "@/lib/theme";
+import { formatWaterAmount, fromMl } from "@/lib/water-units";
 
 type Props = {
   unit: WaterUnit;
-  goal: number;
-  current: number;
+  goalMl: number;
+  currentMl: number;
   colors: Palette;
   onQuickAdd: () => void;
   onCustomAdd: () => void;
@@ -16,16 +17,16 @@ type Props = {
 
 export default function WaterCard({
   unit,
-  goal,
-  current,
+  goalMl,
+  currentMl,
   colors,
   onQuickAdd,
   onCustomAdd,
   onCycleUnit,
 }: Props) {
-  const pct = goal > 0 ? Math.min(current / goal, 1) : 0;
-  const display = (n: number) =>
-    unit === "liters" ? n.toFixed(1) : (Math.round(n * 10) / 10).toString();
+  const pct = goalMl > 0 ? Math.min(currentMl / goalMl, 1) : 0;
+  const currentDisplay = fromMl(currentMl, unit);
+  const goalDisplay = fromMl(goalMl, unit);
 
   return (
     <View
@@ -61,10 +62,10 @@ export default function WaterCard({
 
       <View style={styles.amountRow}>
         <Text style={[styles.current, { color: colors.text }]}>
-          {display(current)}
+          {formatWaterAmount(currentDisplay, unit)}
         </Text>
         <Text style={[styles.goal, { color: colors.textMuted }]}>
-          / {display(goal)} {unit}
+          / {formatWaterAmount(goalDisplay, unit)} {unit}
         </Text>
       </View>
 

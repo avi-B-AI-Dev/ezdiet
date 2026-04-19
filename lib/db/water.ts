@@ -1,24 +1,20 @@
 import { getDatabase } from "./client";
-import type { WaterUnit } from "./users";
 
 export type WaterEntry = {
   id: number;
-  amount: number;
-  unit: WaterUnit;
+  amount_ml: number;
   logged_at: string;
 };
 
 export async function logWater(
-  amount: number,
-  unit: WaterUnit,
+  amountMl: number,
   loggedAt?: string,
 ): Promise<number> {
   const db = await getDatabase();
   const res = await db.runAsync(
-    `INSERT INTO water_log (amount, unit, logged_at)
-     VALUES (?, ?, COALESCE(?, datetime('now','localtime')))`,
-    amount,
-    unit,
+    `INSERT INTO water_log (amount_ml, logged_at)
+     VALUES (?, COALESCE(?, datetime('now','localtime')))`,
+    amountMl,
     loggedAt ?? null,
   );
   return res.lastInsertRowId;
