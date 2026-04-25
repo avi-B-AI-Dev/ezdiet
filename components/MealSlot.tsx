@@ -14,6 +14,7 @@ type Props = {
   onQuickAdd: () => void;
   onToggleFavorite: () => void;
   onPressMeal?: (meal: Meal) => void;
+  onLongPressMeal?: (meal: Meal) => void;
 };
 
 export default function MealSlot({
@@ -26,6 +27,7 @@ export default function MealSlot({
   onQuickAdd,
   onToggleFavorite,
   onPressMeal,
+  onLongPressMeal,
 }: Props) {
   const totalCals = meals.reduce(
     (sum, m) => sum + m.total_calories * m.servings,
@@ -68,6 +70,8 @@ export default function MealSlot({
             <Pressable
               key={m.id}
               onPress={() => onPressMeal?.(m)}
+              onLongPress={() => onLongPressMeal?.(m)}
+              delayLongPress={350}
               style={({ pressed }) => [
                 styles.mealRow,
                 pressed && { opacity: 0.6 },
@@ -119,35 +123,36 @@ export default function MealSlot({
 }
 
 const styles = StyleSheet.create({
-  card: { borderRadius: 14, padding: 14, borderWidth: 1, gap: 12 },
+  card: { borderRadius: 16, padding: 16, borderWidth: 1, gap: 14 },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  headerLeft: { flexDirection: "row", alignItems: "center", gap: 8, flex: 1 },
-  title: { fontSize: 15, fontWeight: "700" },
-  totalCals: { fontSize: 13 },
-  mealList: { gap: 8 },
+  headerLeft: { flexDirection: "row", alignItems: "center", gap: 10, flex: 1 },
+  title: { fontSize: 17, fontWeight: "800" },
+  totalCals: { fontSize: 15, fontWeight: "600" },
+  mealList: { gap: 10 },
   mealRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    gap: 8,
+    gap: 10,
+    paddingVertical: 4,
   },
-  mealName: { fontSize: 14, flex: 1 },
-  mealCals: { fontSize: 13, fontWeight: "600" },
-  actions: { flexDirection: "row", gap: 8 },
+  mealName: { fontSize: 16, fontWeight: "600", flex: 1 },
+  mealCals: { fontSize: 15, fontWeight: "700" },
+  actions: { flexDirection: "row", gap: 10 },
   addBtn: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 4,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    gap: 5,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
     borderRadius: 10,
   },
-  addBtnText: { fontSize: 13, fontWeight: "700" },
+  addBtnText: { fontSize: 14, fontWeight: "800" },
   quickBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
     borderRadius: 10,
     borderWidth: 1,
   },
-  quickBtnText: { fontSize: 13, fontWeight: "600" },
+  quickBtnText: { fontSize: 14, fontWeight: "700" },
 });

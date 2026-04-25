@@ -1,5 +1,7 @@
 import * as SQLite from "expo-sqlite";
 
+import { COMMON_INGREDIENTS_SEED } from "./common-ingredients-seed";
+
 const DB_NAME = "ezdiet.db";
 
 const SCHEMA_SQL = `
@@ -135,6 +137,51 @@ CREATE TABLE IF NOT EXISTS water_log (
   logged_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS dishes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  meal_id INTEGER REFERENCES meals(id) ON DELETE CASCADE,
+  name TEXT,
+  total_calories REAL NOT NULL DEFAULT 0,
+  total_protein REAL NOT NULL DEFAULT 0,
+  total_carbs REAL NOT NULL DEFAULT 0,
+  total_fat REAL NOT NULL DEFAULT 0,
+  servings_made REAL NOT NULL DEFAULT 1,
+  servings_eaten REAL NOT NULL DEFAULT 1,
+  servings_remaining REAL NOT NULL DEFAULT 0,
+  is_recipe INTEGER NOT NULL DEFAULT 0,
+  recipe_name TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS nutrition_cache (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ingredient_name TEXT NOT NULL,
+  quantity REAL,
+  unit TEXT,
+  calories REAL NOT NULL,
+  protein REAL NOT NULL,
+  carbs REAL NOT NULL,
+  fat REAL NOT NULL,
+  fiber REAL,
+  assumed_weight_g REAL,
+  confidence INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  cached_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS common_ingredients (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  category TEXT NOT NULL,
+  calories_per_100g REAL NOT NULL,
+  protein_per_100g REAL NOT NULL,
+  carbs_per_100g REAL NOT NULL,
+  fat_per_100g REAL NOT NULL,
+  fiber_per_100g REAL NOT NULL DEFAULT 0,
+  typical_unit TEXT NOT NULL,
+  typical_unit_weight_g REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_meals_logged_at ON meals(logged_at);
 CREATE INDEX IF NOT EXISTS idx_meal_ingredients_meal_id ON meal_ingredients(meal_id);
 CREATE INDEX IF NOT EXISTS idx_recipe_ingredients_recipe_id ON recipe_ingredients(recipe_id);
@@ -142,6 +189,9 @@ CREATE INDEX IF NOT EXISTS idx_supplement_log_logged_at ON supplement_log(logged
 CREATE INDEX IF NOT EXISTS idx_water_log_logged_at ON water_log(logged_at);
 CREATE INDEX IF NOT EXISTS idx_pantry_name ON pantry_items(name);
 CREATE INDEX IF NOT EXISTS idx_pantry_barcode ON pantry_items(barcode);
+CREATE INDEX IF NOT EXISTS idx_dishes_meal_id ON dishes(meal_id);
+CREATE INDEX IF NOT EXISTS idx_nutrition_cache_name ON nutrition_cache(ingredient_name);
+CREATE INDEX IF NOT EXISTS idx_common_ingredients_name ON common_ingredients(name);
 `;
 
 const USER_MIGRATIONS: string[] = [
@@ -172,6 +222,15 @@ const USER_MIGRATIONS: string[] = [
   "ALTER TABLE users ADD COLUMN min_calories INTEGER",
   "ALTER TABLE users ADD COLUMN water_goal_ml REAL",
   "UPDATE users SET water_goal_ml = CASE water_unit WHEN 'glasses' THEN water_goal * 237 WHEN 'oz' THEN water_goal * 29.57 WHEN 'liters' THEN water_goal * 1000 ELSE water_goal END WHERE water_goal_ml IS NULL",
+  "ALTER TABLE meal_ingredients ADD COLUMN dish_id INTEGER REFERENCES dishes(id) ON DELETE CASCADE",
+  "ALTER TABLE meal_ingredients ADD COLUMN confidence INTEGER",
+  "ALTER TABLE meal_ingredients ADD COLUMN source TEXT",
+  "ALTER TABLE meal_ingredients ADD COLUMN assumed_weight_g REAL",
+  "ALTER TABLE meals ADD COLUMN name TEXT",
+  "ALTER TABLE meals ADD COLUMN meal_source TEXT",
+  "ALTER TABLE meals ADD COLUMN restaurant_name TEXT",
+  "ALTER TABLE meals ADD COLUMN from_leftover_dish_id INTEGER REFERENCES dishes(id) ON DELETE SET NULL",
+  "ALTER TABLE meals ADD COLUMN from_leftover_servings REAL",
 ];
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -206,6 +265,41 @@ async function migrateWaterLogToMl(
   `);
 }
 
+async function seedCommonIngredients(
+  db: SQLite.SQLiteDatabase,
+): Promise<void> {
+  // UPSERT on every init so seed tweaks (category/weight/calorie corrections)
+  // propagate to existing installs. The table isn't FK-referenced, so
+  // replacing rows by name is safe.
+  await db.withTransactionAsync(async () => {
+    for (const item of COMMON_INGREDIENTS_SEED) {
+      await db.runAsync(
+        `INSERT INTO common_ingredients
+           (name, category, calories_per_100g, protein_per_100g, carbs_per_100g, fat_per_100g, fiber_per_100g, typical_unit, typical_unit_weight_g)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+           category = excluded.category,
+           calories_per_100g = excluded.calories_per_100g,
+           protein_per_100g = excluded.protein_per_100g,
+           carbs_per_100g = excluded.carbs_per_100g,
+           fat_per_100g = excluded.fat_per_100g,
+           fiber_per_100g = excluded.fiber_per_100g,
+           typical_unit = excluded.typical_unit,
+           typical_unit_weight_g = excluded.typical_unit_weight_g`,
+        item.name.toLowerCase(),
+        item.category,
+        item.calories_per_100g,
+        item.protein_per_100g,
+        item.carbs_per_100g,
+        item.fat_per_100g,
+        item.fiber_per_100g,
+        item.typical_unit,
+        item.typical_unit_weight_g,
+      );
+    }
+  });
+}
+
 export function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   if (!dbPromise) {
     dbPromise = (async () => {
@@ -222,6 +316,11 @@ export function getDatabase(): Promise<SQLite.SQLiteDatabase> {
         await migrateWaterLogToMl(db);
       } catch (err) {
         console.warn("water_log migration failed:", err);
+      }
+      try {
+        await seedCommonIngredients(db);
+      } catch (err) {
+        console.warn("common_ingredients seed failed:", err);
       }
       return db;
     })();

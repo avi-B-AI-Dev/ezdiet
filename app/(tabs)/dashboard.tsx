@@ -3,6 +3,7 @@ import { useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
 import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
 import {
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,19 +19,27 @@ import QuickAddModal from "@/components/QuickAddModal";
 import WaterAddModal from "@/components/WaterAddModal";
 import WaterCard from "@/components/WaterCard";
 import {
+  clearDishLeftover,
+  clearMealLeftoverLink,
+  countOtherDishConsumers,
   createMeal,
+  deleteDish,
+  deleteMeal,
   dismissOccurrence,
   getUser,
   listDashboardSupplements,
+  listDishesForMeal,
   listMealsByDate,
   listWaterByDate,
   logWater,
   markOccurrenceTaken,
+  resetDishToFullLeftover,
   SUPPLEMENT_FREQUENCY_LABEL,
   TIME_OF_DAY_LABEL,
   toggleOccurrence,
   updateWaterSettings,
   type DashboardSupplement,
+  type Dish,
   type Meal,
   type MealType,
   type SupplementFrequency,
@@ -39,6 +48,7 @@ import {
   type WaterEntry,
   type WaterUnit,
 } from "@/lib/db";
+import { getDatabase } from "@/lib/db/client";
 import {
   DAY_NAMES,
   daysBetween,
@@ -142,22 +152,145 @@ export default function DashboardScreen() {
     });
   };
 
-  const handleQuickAddMeal = async (slot: MealType, calories: number) => {
+  const handleQuickAddMeal = async (
+    slot: MealType,
+    payload: import("@/components/QuickAddModal").QuickAddPayload,
+  ) => {
+    const description =
+      payload.name ||
+      (payload.source === "restaurant" && payload.restaurantName
+        ? payload.restaurantName
+        : "Quick add");
     await createMeal(
       {
         meal_type: slot,
-        input_type: "combination",
-        description: "Quick add",
-        total_calories: calories,
-        total_protein: 0,
-        total_carbs: 0,
-        total_fat: 0,
+        input_type: payload.source === "restaurant" ? "local_restaurant" : "combination",
+        description,
+        total_calories: payload.calories,
+        total_protein: payload.protein,
+        total_carbs: payload.carbs,
+        total_fat: payload.fat,
         servings: 1,
+        name: payload.name,
+        meal_source: payload.source,
+        restaurant_name: payload.restaurantName,
       },
       [],
     );
     setQuickAdd(null);
     load();
+  };
+
+  const handleDeleteMeal = async (meal: Meal) => {
+    // Pick the candidate dish that might trigger the leftover popup:
+    //   - re-log meal: the linked dish (and the popup shows its projected leftover)
+    //   - regular meal with exactly one owned dish that has leftovers
+    //
+    // Multi-dish meals or meals whose dish has no leftovers fall back to the
+    // simple "Delete this meal?" confirm.
+    let candidate: { dish: Dish; isOwned: boolean } | null = null;
+
+    if (meal.from_leftover_dish_id) {
+      const db = await getDatabase();
+      const linkedDish = await db.getFirstAsync<Dish>(
+        "SELECT * FROM dishes WHERE id = ?",
+        meal.from_leftover_dish_id,
+      );
+      if (linkedDish) {
+        // Project: deleting this re-log restores its consumed servings.
+        const projectedRemaining =
+          linkedDish.servings_remaining + (meal.from_leftover_servings ?? 0);
+        if (projectedRemaining > 0) {
+          candidate = { dish: linkedDish, isOwned: false };
+        }
+      }
+    } else {
+      const owned = await listDishesForMeal(meal.id);
+      if (owned.length === 1 && owned[0].servings_remaining > 0) {
+        candidate = { dish: owned[0], isOwned: true };
+      }
+    }
+
+    if (!candidate) {
+      // Simple confirm
+      Alert.alert("Delete this meal?", meal.description, [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            await deleteMeal(meal.id);
+            load();
+          },
+        },
+      ]);
+      return;
+    }
+
+    // Are there other consumers of this dish (besides the meal being deleted)?
+    const others = await countOtherDishConsumers(candidate.dish.id, meal.id);
+    if (others > 0) {
+      // Not the last portion — silent confirm and let deleteMeal recalc.
+      Alert.alert("Delete this meal?", meal.description, [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            await deleteMeal(meal.id);
+            load();
+          },
+        },
+      ]);
+      return;
+    }
+
+    // Last portion of a prep with leftovers — ask what to do with the rest.
+    const dishId = candidate.dish.id;
+    const isOwned = candidate.isOwned;
+
+    Alert.alert(
+      "You deleted your portion",
+      "What about the remaining servings?",
+      [
+        {
+          text: "I still have them",
+          onPress: async () => {
+            // Reset the dish to fully unconsumed (full servings_made remaining).
+            // For re-log case, also clear the link so deleteMeal's auto-restore
+            // doesn't double-add servings on top of our explicit reset.
+            await resetDishToFullLeftover(dishId, isOwned);
+            if (!isOwned) await clearMealLeftoverLink(meal.id);
+            await deleteMeal(meal.id);
+            load();
+          },
+        },
+        {
+          text: "They're gone",
+          onPress: async () => {
+            await clearDishLeftover(dishId, isOwned);
+            if (!isOwned) await clearMealLeftoverLink(meal.id);
+            await deleteMeal(meal.id);
+            load();
+          },
+        },
+        {
+          text: "I never made this",
+          style: "destructive",
+          onPress: async () => {
+            // For owned: deleteMeal cascades the dish; explicit deleteDish is
+            // a no-op then. For re-log: dish is owned by another meal (or
+            // detached), so wipe it explicitly.
+            if (!isOwned) {
+              await clearMealLeftoverLink(meal.id);
+              await deleteDish(dishId);
+            }
+            await deleteMeal(meal.id);
+            load();
+          },
+        },
+      ],
+    );
   };
 
   const handleAddWaterOne = async () => {
@@ -305,9 +438,21 @@ export default function DashboardScreen() {
                 meals={mealsByType[s.type]}
                 favorited={favorites.has(s.type)}
                 colors={colors}
-                onAdd={() => router.push("/log")}
+                onAdd={() =>
+                  router.push({
+                    pathname: "/meal-log",
+                    params: { mealType: s.type },
+                  })
+                }
                 onQuickAdd={() => setQuickAdd({ kind: "meal", slot: s.type })}
                 onToggleFavorite={() => handleToggleFavorite(s.type)}
+                onPressMeal={(m) =>
+                  router.push({
+                    pathname: "/meal-log",
+                    params: { mealId: String(m.id) },
+                  })
+                }
+                onLongPressMeal={handleDeleteMeal}
               />
             ))}
           </View>
@@ -472,7 +617,7 @@ export default function DashboardScreen() {
       </ScrollView>
 
       <Pressable
-        onPress={() => router.push("/log")}
+        onPress={() => router.push("/meal-log")}
         style={({ pressed }) => [
           styles.fab,
           {
@@ -492,12 +637,10 @@ export default function DashboardScreen() {
             ? `Quick add ${slotLabel(quickAdd.slot)}`
             : ""
         }
-        placeholder="450"
-        unit="kcal"
         colors={colors}
         onCancel={() => setQuickAdd(null)}
-        onConfirm={(n) =>
-          quickAdd?.kind === "meal" && handleQuickAddMeal(quickAdd.slot, n)
+        onConfirm={(payload) =>
+          quickAdd?.kind === "meal" && handleQuickAddMeal(quickAdd.slot, payload)
         }
       />
 

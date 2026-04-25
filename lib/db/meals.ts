@@ -12,6 +12,8 @@ export type MealInputType =
   | "fruit_raw"
   | "combination";
 
+export type MealSource = "homemade" | "restaurant";
+
 export type Meal = {
   id: number;
   meal_type: MealType;
@@ -23,6 +25,11 @@ export type Meal = {
   total_fat: number;
   servings: number;
   logged_at: string;
+  name: string | null;
+  meal_source: MealSource | null;
+  restaurant_name: string | null;
+  from_leftover_dish_id: number | null;
+  from_leftover_servings: number | null;
 };
 
 export type MealIngredient = {
@@ -38,8 +45,22 @@ export type MealIngredient = {
   fat: number;
 };
 
-export type MealInput = Omit<Meal, "id" | "logged_at"> & {
+export type MealInput = Omit<
+  Meal,
+  | "id"
+  | "logged_at"
+  | "name"
+  | "meal_source"
+  | "restaurant_name"
+  | "from_leftover_dish_id"
+  | "from_leftover_servings"
+> & {
   logged_at?: string;
+  name?: string | null;
+  meal_source?: MealSource | null;
+  restaurant_name?: string | null;
+  from_leftover_dish_id?: number | null;
+  from_leftover_servings?: number | null;
 };
 
 export type MealIngredientInput = Omit<MealIngredient, "id" | "meal_id">;
@@ -53,8 +74,8 @@ export async function createMeal(
   await db.withTransactionAsync(async () => {
     const res = await db.runAsync(
       `INSERT INTO meals
-         (meal_type, input_type, description, total_calories, total_protein, total_carbs, total_fat, servings, logged_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now','localtime')))`,
+         (meal_type, input_type, description, total_calories, total_protein, total_carbs, total_fat, servings, logged_at, name, meal_source, restaurant_name, from_leftover_dish_id, from_leftover_servings)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now','localtime')), ?, ?, ?, ?, ?)`,
       meal.meal_type,
       meal.input_type,
       meal.description,
@@ -64,6 +85,11 @@ export async function createMeal(
       meal.total_fat,
       meal.servings,
       meal.logged_at ?? null,
+      meal.name ?? null,
+      meal.meal_source ?? null,
+      meal.restaurant_name ?? null,
+      meal.from_leftover_dish_id ?? null,
+      meal.from_leftover_servings ?? null,
     );
     mealId = res.lastInsertRowId;
     for (const ing of ingredients) {
@@ -109,6 +135,14 @@ export async function listMealsByDate(dateISO: string): Promise<Meal[]> {
   );
 }
 
+export async function listRecentMeals(limit: number): Promise<Meal[]> {
+  const db = await getDatabase();
+  return db.getAllAsync<Meal>(
+    "SELECT * FROM meals ORDER BY logged_at DESC LIMIT ?",
+    limit,
+  );
+}
+
 export async function listMealsBetween(
   startISO: string,
   endISO: string,
@@ -123,5 +157,53 @@ export async function listMealsBetween(
 
 export async function deleteMeal(id: number): Promise<void> {
   const db = await getDatabase();
-  await db.runAsync("DELETE FROM meals WHERE id = ?", id);
+  await db.withTransactionAsync(async () => {
+    // 1) If this meal was a leftover re-log, push its consumed servings back
+    //    onto the linked dish (capped at servings_made).
+    const meal = await db.getFirstAsync<{
+      from_leftover_dish_id: number | null;
+      from_leftover_servings: number | null;
+    }>(
+      "SELECT from_leftover_dish_id, from_leftover_servings FROM meals WHERE id = ?",
+      id,
+    );
+    if (
+      meal?.from_leftover_dish_id != null &&
+      meal.from_leftover_servings != null &&
+      meal.from_leftover_servings > 0
+    ) {
+      await db.runAsync(
+        `UPDATE dishes
+           SET servings_remaining = MIN(servings_remaining + ?, servings_made),
+               servings_eaten = MAX(servings_eaten - ?, 0)
+         WHERE id = ?`,
+        meal.from_leftover_servings,
+        meal.from_leftover_servings,
+        meal.from_leftover_dish_id,
+      );
+    }
+
+    // 2) For dishes owned by this meal, detach any that other re-log meals
+    //    still reference — that preserves their leftover info instead of
+    //    cascading away with this meal.
+    const ownedDishes = await db.getAllAsync<{ id: number }>(
+      "SELECT id FROM dishes WHERE meal_id = ?",
+      id,
+    );
+    for (const d of ownedDishes) {
+      const others = await db.getFirstAsync<{ c: number }>(
+        "SELECT COUNT(*) AS c FROM meals WHERE from_leftover_dish_id = ? AND id != ?",
+        d.id,
+        id,
+      );
+      if ((others?.c ?? 0) > 0) {
+        await db.runAsync(
+          "UPDATE dishes SET meal_id = NULL WHERE id = ?",
+          d.id,
+        );
+      }
+    }
+
+    await db.runAsync("DELETE FROM meals WHERE id = ?", id);
+  });
 }
