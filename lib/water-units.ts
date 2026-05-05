@@ -39,6 +39,12 @@ export function formatWaterAmount(n: number, unit: WaterUnit): string {
     const rounded = Math.round(n * 100) / 100;
     return rounded.toFixed(rounded < 1 ? 2 : 1);
   }
+  // Glasses are conceptually whole units — partial volumes (e.g. a 250 ml
+  // custom add when 1 glass = 237 ml) used to surface as "3.1 / 8 glasses".
+  // ml stays the source of truth; we only round on the display boundary.
+  if (unit === "glasses") {
+    return String(Math.round(n));
+  }
   const rounded = Math.round(n * 10) / 10;
   return rounded.toString();
 }
