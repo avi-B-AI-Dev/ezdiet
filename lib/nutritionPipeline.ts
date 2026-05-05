@@ -45,11 +45,17 @@ export const PIPELINE_STEP_LABEL: Record<PipelineStep, string> = {
   done: "Done",
 };
 
+// Each agent returns one of these four sources. The badge and the pantry
+// decrement logic both branch on this value, so keep them aligned:
+//   'pantry'          → user's actual pantry inventory (decrements on use)
+//   'cache'           → built-in common_ingredients DB or the agent cache
+//   'open_food_facts' → live API hit (Agent 4)
+//   'ai_estimate'     → fallback AI estimation (Agent 5)
+// 'manual' is kept for legacy meal/recipe rows hydrated from old DB writes.
 export type NutritionSource =
   | "pantry"
-  | "common"
   | "cache"
-  | "api"
+  | "open_food_facts"
   | "ai_estimate"
   | "manual";
 
@@ -434,8 +440,11 @@ function commonToResolved(
     carbs: round(c.carbs_per_100g * f),
     fat: round(c.fat_per_100g * f),
     fiber: round(c.fiber_per_100g * f),
-    confidence: 95,
-    source: "pantry",
+    confidence: 90,
+    // Built-in common_ingredients hits are NOT user-pantry inventory.
+    // Treat them as a cache so the badge and pantry decrement do the
+    // right thing.
+    source: "cache",
     colorCode: "none",
     category: c.category,
   };
@@ -526,7 +535,7 @@ async function apiLookup(parsed: ParsedIngredient): Promise<LookupResolution> {
       fat: fat_per_100g,
       fiber: fiber_per_100g,
       confidence: 85,
-      source: "api",
+      source: "open_food_facts",
     });
 
     const common = await findCommonIngredientByName(parsed.name);
@@ -545,7 +554,7 @@ async function apiLookup(parsed: ParsedIngredient): Promise<LookupResolution> {
         fat: round(fat_per_100g * f),
         fiber: round(fiber_per_100g * f),
         confidence: 85,
-        source: "api",
+        source: "open_food_facts",
         colorCode: "none",
       },
     };

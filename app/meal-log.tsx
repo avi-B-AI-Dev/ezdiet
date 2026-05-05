@@ -19,6 +19,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import {
+  consumeFromPantry,
   consumeLeftover,
   createDish,
   createMeal,
@@ -26,6 +27,7 @@ import {
   deleteDishesForMeal,
   deleteMeal,
   deleteRecipe,
+  findPantryItemByFuzzyName,
   getMeal,
   listActiveLeftovers,
   listDishesForMeal,
@@ -413,6 +415,21 @@ export default function MealLogScreen() {
             fat: ing.fat,
           })),
         );
+      }
+
+      // Pantry consumption: only decrement when the ingredient resolved
+      // through the user's actual pantry (Agent 2 hit). Cache, OFF, and
+      // AI-estimate sources have no inventory to track.
+      const portionScale = made > 0 ? eaten / made : 0;
+      if (portionScale > 0) {
+        for (const ing of d.ingredients) {
+          if (ing.source !== "pantry") continue;
+          if (!ing.assumed_weight_g || ing.assumed_weight_g <= 0) continue;
+          const pantryItem = await findPantryItemByFuzzyName(ing.name);
+          if (!pantryItem) continue;
+          const grams = ing.assumed_weight_g * portionScale;
+          await consumeFromPantry(pantryItem.id, grams);
+        }
       }
       void dishId;
     }
@@ -1564,13 +1581,13 @@ function ConfidenceBadge({ source }: { source: NutritionSource }) {
   let bg = "#DCFCE7";
   let fg = "#166534";
   if (source === "pantry") {
-    label = "Pantry"; bg = "#DCFCE7"; fg = "#166534";
+    label = "Pantry"; bg = "#DCFCE7"; fg = "#166534"; // green
   } else if (source === "cache") {
-    label = "Cached"; bg = "#E0E7FF"; fg = "#3730A3";
-  } else if (source === "api") {
-    label = "API"; bg = "#DBEAFE"; fg = "#1E40AF";
+    label = "Cached"; bg = "#DBEAFE"; fg = "#1E40AF"; // blue
+  } else if (source === "open_food_facts") {
+    label = "OFF"; bg = "#F3E8FF"; fg = "#6B21A8"; // purple
   } else if (source === "ai_estimate") {
-    label = "AI estimate"; bg = "#FEF3C7"; fg = "#92400E";
+    label = "AI estimate"; bg = "#FEF3C7"; fg = "#92400E"; // orange
   } else {
     label = "Manual"; bg = "#F1F5F9"; fg = "#475569";
   }
