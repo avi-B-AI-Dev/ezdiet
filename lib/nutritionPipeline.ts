@@ -14,6 +14,41 @@ import {
   type CommonIngredient,
 } from "./db/common-ingredients";
 import { searchPantryItems, type PantryItem } from "./db/pantry";
+import {
+  detectCookingState,
+  getCookingRatio,
+  resolveCookingState,
+  type CookingState,
+} from "./cookingState";
+
+// What form is the per-100g profile keyed in? Detect from typical_unit
+// strings like "1 cup cooked" / "1 cup dry". Returns null when ambiguous.
+function profileCookingForm(typical_unit: string | null | undefined): "raw" | "cooked" | null {
+  if (!typical_unit) return null;
+  if (/cooked|boiled|steamed/i.test(typical_unit)) return "cooked";
+  if (/dry|raw|uncooked/i.test(typical_unit)) return "raw";
+  return null;
+}
+
+// When the per-100g profile and the user's cooking state disagree, scale
+// macros so the calorie figure reflects the form the user actually ate.
+//   profile cooked + user raw    → multiply by ratio (raw is denser)
+//   profile raw    + user cooked → divide by ratio (cooked is diluted)
+// Returns 1 if no adjustment is needed.
+function macroScaleForCookingMismatch(
+  name: string,
+  typical_unit: string | null | undefined,
+  userState: CookingState,
+): number {
+  const profile = profileCookingForm(typical_unit);
+  if (!profile) return 1;
+  if (userState === "irrelevant") return 1;
+  if (profile === userState) return 1;
+  const ratio = getCookingRatio(name) ?? 2.5;
+  if (profile === "cooked" && userState === "raw") return ratio;
+  if (profile === "raw" && userState === "cooked") return 1 / ratio;
+  return 1;
+}
 
 export const USE_MOCK_API = true;
 const CLAUDE_API_KEY = ""; // flip USE_MOCK_API to false and fill in to go live
@@ -65,6 +100,7 @@ export type ParsedIngredient = {
   name: string;
   quantity: number;
   unit: string;
+  cooking_state: CookingState;
 };
 
 export type ResolvedIngredient = {
@@ -80,6 +116,7 @@ export type ResolvedIngredient = {
   fiber: number;
   confidence: number;
   source: NutritionSource;
+  cooking_state: CookingState;
   flagged?: boolean;
   flagReason?: string;
   colorCode: ColorCode;
@@ -183,7 +220,21 @@ function stripFillers(name: string): string {
 const TRAILING_UNITS =
   "g|kg|oz|lb|lbs|ml|l|cup|cups|tbsp|tablespoon|tablespoons|tsp|teaspoon|teaspoons|spoon|spoons|piece|pieces|slice|slices|clove|cloves|scoop|scoops";
 
-function parseSinglePhrase(raw: string): ParsedIngredient | null {
+// parseSinglePhrase returns the old shape (no cooking_state). The wrapper
+// `parsePhraseWithCookingState` handles raw/cooked detection and decoration.
+type RawParsed = { name: string; quantity: number; unit: string };
+
+function parsePhraseWithCookingState(raw: string): ParsedIngredient | null {
+  const { cleanedName: cleanedText, detected } = detectCookingState(raw);
+  const partial = parseSinglePhrase(cleanedText);
+  if (!partial) return null;
+  return {
+    ...partial,
+    cooking_state: resolveCookingState(partial.name, detected),
+  };
+}
+
+function parseSinglePhrase(raw: string): RawParsed | null {
   // Strip leading filler words FIRST, so "a bit of butter" → "butter" before
   // we try to interpret "a" as quantity 1.
   const text = stripFillers(raw.trim().replace(/\s+/g, " "));
@@ -268,7 +319,7 @@ function parseSinglePhrase(raw: string): ParsedIngredient | null {
 function extractUnitAndName(
   rest: string,
   quantity: number,
-): ParsedIngredient {
+): RawParsed {
   const tokens = rest.trim().split(/\s+/);
   if (tokens.length === 0) return { name: rest.trim(), quantity, unit: "whole" };
 
@@ -294,7 +345,7 @@ function mockParse(rawText: string): ParsedIngredient[] {
   const phrases = splitIngredientPhrases(rawText);
   const out: ParsedIngredient[] = [];
   for (const p of phrases) {
-    const parsed = parseSinglePhrase(p);
+    const parsed = parsePhraseWithCookingState(p);
     if (parsed && parsed.name) out.push(parsed);
   }
   return out;
@@ -337,8 +388,15 @@ Input: """${rawText}"""`;
       data?.content?.[0]?.text ?? data?.content?.[0]?.input?.text ?? "[]";
     const match = text.match(/\[[\s\S]*\]/);
     if (!match) return mockParse(rawText);
-    const parsed = JSON.parse(match[0]) as ParsedIngredient[];
-    return parsed.filter((p) => p && p.name);
+    const parsed = JSON.parse(match[0]) as RawParsed[];
+    // Live mode: tag cooking_state from the original phrase context. Live
+    // Claude may pre-strip qualifiers, so default by-name when no detection.
+    return parsed
+      .filter((p) => p && p.name)
+      .map((p) => ({
+        ...p,
+        cooking_state: resolveCookingState(p.name, null),
+      }));
   } catch {
     return mockParse(rawText);
   }
@@ -419,6 +477,7 @@ function pantryToResolved(
     fiber: round((p.fiber_per_100g ?? 0) * f),
     confidence: 95,
     source: "pantry",
+    cooking_state: parsed.cooking_state,
     colorCode: "none",
   };
 }
@@ -429,22 +488,31 @@ function commonToResolved(
 ): ResolvedIngredient {
   const weight_g = unitToGrams(parsed.quantity, parsed.unit, c);
   const f = weight_g / 100;
+  // Reconcile profile form with user's cooking state: e.g. "200g raw rice"
+  // against a cooked-keyed profile must multiply by 3 to reflect the
+  // higher calorie density of raw rice.
+  const macroScale = macroScaleForCookingMismatch(
+    parsed.name,
+    c.typical_unit,
+    parsed.cooking_state,
+  );
   return {
     id: `${parsed.name}-${Math.random().toString(36).slice(2, 8)}`,
     name: parsed.name,
     quantity: parsed.quantity,
     unit: parsed.unit,
     assumed_weight_g: weight_g,
-    calories: round(c.calories_per_100g * f),
-    protein: round(c.protein_per_100g * f),
-    carbs: round(c.carbs_per_100g * f),
-    fat: round(c.fat_per_100g * f),
-    fiber: round(c.fiber_per_100g * f),
+    calories: round(c.calories_per_100g * f * macroScale),
+    protein: round(c.protein_per_100g * f * macroScale),
+    carbs: round(c.carbs_per_100g * f * macroScale),
+    fat: round(c.fat_per_100g * f * macroScale),
+    fiber: round(c.fiber_per_100g * f * macroScale),
     confidence: 90,
     // Built-in common_ingredients hits are NOT user-pantry inventory.
     // Treat them as a cache so the badge and pantry decrement do the
     // right thing.
     source: "cache",
+    cooking_state: parsed.cooking_state,
     colorCode: "none",
     category: c.category,
   };
@@ -474,10 +542,17 @@ async function cacheLookup(parsed: ParsedIngredient): Promise<LookupResolution> 
   const cached = await findCachedNutrition(parsed.name);
   if (!cached) return null;
 
-  // Cached row is "per 100g". Scale to current quantity/unit.
+  // Cached row is "per 100g". Scale to current quantity/unit. We re-look-up
+  // the common_ingredients entry to get the typical_unit string, so cache
+  // hits also benefit from raw↔cooked macro reconciliation.
   const common = await findCommonIngredientByName(parsed.name);
   const weight_g = unitToGrams(parsed.quantity, parsed.unit, common);
   const f = weight_g / 100;
+  const macroScale = macroScaleForCookingMismatch(
+    parsed.name,
+    common?.typical_unit,
+    parsed.cooking_state,
+  );
 
   return {
     resolved: {
@@ -486,13 +561,14 @@ async function cacheLookup(parsed: ParsedIngredient): Promise<LookupResolution> 
       quantity: parsed.quantity,
       unit: parsed.unit,
       assumed_weight_g: weight_g,
-      calories: round(cached.calories * f),
-      protein: round(cached.protein * f),
-      carbs: round(cached.carbs * f),
-      fat: round(cached.fat * f),
-      fiber: round((cached.fiber ?? 0) * f),
+      calories: round(cached.calories * f * macroScale),
+      protein: round(cached.protein * f * macroScale),
+      carbs: round(cached.carbs * f * macroScale),
+      fat: round(cached.fat * f * macroScale),
+      fiber: round((cached.fiber ?? 0) * f * macroScale),
       confidence: cached.confidence,
       source: "cache",
+      cooking_state: parsed.cooking_state,
       colorCode: "none",
     },
   };
@@ -555,6 +631,7 @@ async function apiLookup(parsed: ParsedIngredient): Promise<LookupResolution> {
         fiber: round(fiber_per_100g * f),
         confidence: 85,
         source: "open_food_facts",
+        cooking_state: parsed.cooking_state,
         colorCode: "none",
       },
     };
@@ -622,6 +699,7 @@ function mockEstimate(parsed: ParsedIngredient): ResolvedIngredient {
     fiber: 0,
     confidence: 70,
     source: "ai_estimate",
+    cooking_state: parsed.cooking_state,
     colorCode: "none",
   };
 }
@@ -685,6 +763,7 @@ Ingredient: ${JSON.stringify(parsed)}`;
       fiber: round(Number(parsedJson.fiber ?? 0)),
       confidence: 70,
       source: "ai_estimate",
+      cooking_state: parsed.cooking_state,
       colorCode: "none",
     };
     const f = r.assumed_weight_g > 0 ? 100 / r.assumed_weight_g : 1;
@@ -778,6 +857,7 @@ async function validateAndAdjust(
           name: ing.name,
           quantity: ing.quantity,
           unit: ing.unit,
+          cooking_state: ing.cooking_state,
         });
         out.push({ ...re, flagged: true, flagReason: reason });
         continue;

@@ -23,8 +23,10 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import {
+  clearAllPantryItems,
   createSupplement,
   deleteSupplement,
+  getPantryItemCount,
   getUser,
   listSupplements,
   parseTwiceWeeklyDays,
@@ -166,6 +168,8 @@ export default function ProfileScreen() {
   const [householdCode, setHouseholdCode] = useState<string | null>(null);
 
   const [supps, setSupps] = useState<Supplement[]>([]);
+  const [pantryCount, setPantryCount] = useState(0);
+  const [toast, setToast] = useState<string | null>(null);
   const [suppFormId, setSuppFormId] = useState<number | "new" | null>(null);
   const [suppName, setSuppName] = useState("");
   const [suppFreq, setSuppFreq] = useState<SupplementFrequency>("daily");
@@ -234,10 +238,15 @@ export default function ProfileScreen() {
     setSupps(list);
   }, []);
 
+  const loadPantryCount = useCallback(async () => {
+    setPantryCount(await getPantryItemCount());
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       if (!loaded) load();
       loadSupps();
+      loadPantryCount();
       scrolledToSuppRef.current = false;
       if (
         params.scrollTo === "supplements" &&
@@ -249,7 +258,7 @@ export default function ProfileScreen() {
         });
         scrolledToSuppRef.current = true;
       }
-    }, [load, loaded, loadSupps, params.scrollTo]),
+    }, [load, loaded, loadSupps, loadPantryCount, params.scrollTo]),
   );
 
   const openAddSuppForm = () => {
@@ -589,6 +598,28 @@ export default function ProfileScreen() {
           onPress: async () => {
             await resetDatabase();
             router.replace("/");
+          },
+        },
+      ],
+    );
+  };
+
+  const handleClearPantry = () => {
+    if (pantryCount === 0) return;
+    const noun = pantryCount === 1 ? "item" : "items";
+    Alert.alert(
+      "Delete all pantry items?",
+      `This will remove all ${pantryCount} ${noun} from your pantry. Your meal history and cache are unaffected. This cannot be undone.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            await clearAllPantryItems();
+            await loadPantryCount();
+            setToast("Pantry cleared");
+            setTimeout(() => setToast(null), 2500);
           },
         },
       ],
@@ -1193,6 +1224,24 @@ export default function ProfileScreen() {
           </View>
 
           <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Data Management</Text>
+            <Pressable
+              onPress={handleClearPantry}
+              disabled={pantryCount === 0}
+              style={({ pressed }) => [
+                styles.dangerBtn,
+                pantryCount === 0 && { opacity: 0.5 },
+                pressed && pantryCount > 0 && { opacity: 0.7 },
+              ]}
+            >
+              <Ionicons name="basket-outline" size={16} color="#EF4444" />
+              <Text style={styles.dangerBtnText}>
+                Clear pantry ({pantryCount} {pantryCount === 1 ? "item" : "items"})
+              </Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.section}>
             <Text style={styles.sectionTitle}>Danger zone</Text>
             <Pressable
               onPress={handleReset}
@@ -1206,6 +1255,13 @@ export default function ProfileScreen() {
             </Pressable>
           </View>
         </ScrollView>
+
+        {toast && (
+          <View pointerEvents="none" style={styles.toast}>
+            <Ionicons name="checkmark-circle" size={16} color="#FFF" />
+            <Text style={styles.toastText}>{toast}</Text>
+          </View>
+        )}
 
         <View style={styles.footer}>
           <Pressable
@@ -1866,6 +1922,27 @@ const makeStyles = (c: Palette) =>
       backgroundColor: "transparent",
     },
     dangerBtnText: { color: "#EF4444", fontSize: 14, fontWeight: "700" },
+
+    toast: {
+      position: "absolute",
+      left: 20,
+      right: 20,
+      bottom: 100,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      paddingVertical: 12,
+      paddingHorizontal: 16,
+      borderRadius: 12,
+      backgroundColor: "#0F172A",
+      shadowColor: "#000",
+      shadowOpacity: 0.25,
+      shadowRadius: 8,
+      shadowOffset: { width: 0, height: 4 },
+      elevation: 6,
+    },
+    toastText: { color: "#FFF", fontSize: 14, fontWeight: "700" },
 
     footer: { padding: 20, paddingTop: 8 },
     button: {

@@ -84,7 +84,6 @@ export default function DashboardScreen() {
   const [meals, setMeals] = useState<Meal[]>([]);
   const [waterEntries, setWaterEntries] = useState<WaterEntry[]>([]);
   const [streak, setStreak] = useState(0);
-  const [favorites, setFavorites] = useState<Set<MealType>>(new Set());
   const [quickAdd, setQuickAdd] = useState<QuickAdd>(null);
   const [dueSupps, setDueSupps] = useState<DashboardSupplement[]>([]);
 
@@ -142,15 +141,6 @@ export default function DashboardScreen() {
 
   const calorieGoal = user?.daily_calorie_goal ?? 0;
   const remaining = Math.max(calorieGoal - totals.calories, 0);
-
-  const handleToggleFavorite = (slot: MealType) => {
-    setFavorites((prev) => {
-      const next = new Set(prev);
-      if (next.has(slot)) next.delete(slot);
-      else next.add(slot);
-      return next;
-    });
-  };
 
   const handleQuickAddMeal = async (
     slot: MealType,
@@ -436,7 +426,6 @@ export default function DashboardScreen() {
                 title={s.title}
                 icon={s.icon}
                 meals={mealsByType[s.type]}
-                favorited={favorites.has(s.type)}
                 colors={colors}
                 onAdd={() =>
                   router.push({
@@ -445,7 +434,6 @@ export default function DashboardScreen() {
                   })
                 }
                 onQuickAdd={() => setQuickAdd({ kind: "meal", slot: s.type })}
-                onToggleFavorite={() => handleToggleFavorite(s.type)}
                 onPressMeal={(m) =>
                   router.push({
                     pathname: "/meal-log",
@@ -615,20 +603,6 @@ export default function DashboardScreen() {
           </View>
         </View>
       </ScrollView>
-
-      <Pressable
-        onPress={() => router.push("/meal-log")}
-        style={({ pressed }) => [
-          styles.fab,
-          {
-            backgroundColor: colors.accent,
-            bottom: tabBarHeight + 16,
-          },
-          pressed && { opacity: 0.85 },
-        ]}
-      >
-        <Ionicons name="add" size={28} color={colors.accentText} />
-      </Pressable>
 
       <QuickAddModal
         visible={quickAdd?.kind === "meal"}
@@ -890,19 +864,4 @@ const makeStyles = (c: Palette) =>
     },
     missedText: { flex: 1, fontSize: 13, fontWeight: "600", color: "#DC2626" },
     missedAction: { fontSize: 12, fontWeight: "700" },
-
-    fab: {
-      position: "absolute",
-      right: 20,
-      width: 56,
-      height: 56,
-      borderRadius: 28,
-      alignItems: "center",
-      justifyContent: "center",
-      shadowColor: "#000",
-      shadowOpacity: 0.2,
-      shadowRadius: 10,
-      shadowOffset: { width: 0, height: 4 },
-      elevation: 6,
-    },
   });

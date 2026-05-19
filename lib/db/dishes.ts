@@ -31,6 +31,7 @@ export type DishIngredientRow = {
   confidence: number | null;
   source: string | null;
   assumed_weight_g: number | null;
+  cooking_state: "raw" | "cooked" | "irrelevant" | null;
 };
 
 export type DishInput = {
@@ -58,6 +59,7 @@ export type DishIngredientInput = {
   source: string;
   assumed_weight_g?: number | null;
   pantry_item_id?: number | null;
+  cooking_state?: "raw" | "cooked" | "irrelevant" | null;
 };
 
 export async function createDish(
@@ -89,8 +91,8 @@ export async function createDish(
     for (const ing of ingredients) {
       await db.runAsync(
         `INSERT INTO meal_ingredients
-           (meal_id, dish_id, pantry_item_id, name, quantity, unit, calories, protein, carbs, fat, confidence, source, assumed_weight_g)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (meal_id, dish_id, pantry_item_id, name, quantity, unit, calories, protein, carbs, fat, confidence, source, assumed_weight_g, cooking_state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         dish.meal_id,
         dishId,
         ing.pantry_item_id ?? null,
@@ -104,6 +106,7 @@ export async function createDish(
         ing.confidence,
         ing.source,
         ing.assumed_weight_g ?? null,
+        ing.cooking_state ?? null,
       );
     }
   });

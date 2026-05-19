@@ -8,11 +8,9 @@ type Props = {
   title: string;
   icon: keyof typeof Ionicons.glyphMap;
   meals: Meal[];
-  favorited: boolean;
   colors: Palette;
   onAdd: () => void;
   onQuickAdd: () => void;
-  onToggleFavorite: () => void;
   onPressMeal?: (meal: Meal) => void;
   onLongPressMeal?: (meal: Meal) => void;
 };
@@ -21,11 +19,9 @@ export default function MealSlot({
   title,
   icon,
   meals,
-  favorited,
   colors,
   onAdd,
   onQuickAdd,
-  onToggleFavorite,
   onPressMeal,
   onLongPressMeal,
 }: Props) {
@@ -51,17 +47,6 @@ export default function MealSlot({
             </Text>
           ) : null}
         </View>
-        <Pressable
-          onPress={onToggleFavorite}
-          hitSlop={10}
-          style={({ pressed }) => pressed && { opacity: 0.6 }}
-        >
-          <Ionicons
-            name={favorited ? "star" : "star-outline"}
-            size={20}
-            color={favorited ? colors.accent : colors.textSubtle}
-          />
-        </Pressable>
       </View>
 
       {meals.length > 0 ? (

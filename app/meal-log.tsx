@@ -50,6 +50,11 @@ import {
   type PipelineStep,
   type ResolvedIngredient,
 } from "@/lib/nutritionPipeline";
+import {
+  defaultCookingState,
+  getCookingRatio,
+  type CookingState,
+} from "@/lib/cookingState";
 
 // ───────────────────────────────────────────────────────────────────
 // Types
@@ -181,6 +186,9 @@ export default function MealLogScreen() {
             fiber: 0,
             confidence: i.confidence ?? 70,
             source: (i.source as NutritionSource) ?? "manual",
+            cooking_state:
+              ((i as { cooking_state?: CookingState }).cooking_state) ??
+              defaultCookingState(i.name),
             colorCode:
               i.calories > 200 ? "red" : i.calories >= 50 ? "yellow" : "none",
           }));
@@ -271,7 +279,7 @@ export default function MealLogScreen() {
   const editIngredient = (
     dishLocalId: string,
     ingredientId: string,
-    patch: Partial<Pick<ResolvedIngredient, "quantity" | "calories" | "protein" | "carbs" | "fat">>,
+    patch: Partial<Pick<ResolvedIngredient, "quantity" | "calories" | "protein" | "carbs" | "fat" | "cooking_state">>,
   ) => {
     setDishes((prev) =>
       prev.map((d) => {
@@ -390,6 +398,7 @@ export default function MealLogScreen() {
           confidence: ing.confidence,
           source: ing.source,
           assumed_weight_g: ing.assumed_weight_g,
+          cooking_state: ing.cooking_state,
         })),
       );
 
@@ -417,9 +426,11 @@ export default function MealLogScreen() {
         );
       }
 
-      // Pantry consumption: only decrement when the ingredient resolved
-      // through the user's actual pantry (Agent 2 hit). Cache, OFF, and
-      // AI-estimate sources have no inventory to track.
+      // Pantry consumption — only fires for source === 'pantry'. Pantry
+      // inventory is stored in the form the user purchased (raw weight for
+      // convertible items). Cooked logs must be converted to raw before
+      // subtracting, otherwise eating "1 cup cooked rice" would wrongly
+      // deduct 163g from a 1kg raw bag.
       const portionScale = made > 0 ? eaten / made : 0;
       if (portionScale > 0) {
         for (const ing of d.ingredients) {
@@ -427,8 +438,16 @@ export default function MealLogScreen() {
           if (!ing.assumed_weight_g || ing.assumed_weight_g <= 0) continue;
           const pantryItem = await findPantryItemByFuzzyName(ing.name);
           if (!pantryItem) continue;
-          const grams = ing.assumed_weight_g * portionScale;
-          await consumeFromPantry(pantryItem.id, grams);
+          const cookedGrams = ing.assumed_weight_g * portionScale;
+          let rawGrams: number;
+          if (ing.cooking_state === "cooked") {
+            const ratio = getCookingRatio(ing.name) ?? 2.5;
+            rawGrams = cookedGrams / ratio;
+          } else {
+            // 'raw' or 'irrelevant' — already in pantry-equivalent form.
+            rawGrams = cookedGrams;
+          }
+          await consumeFromPantry(pantryItem.id, rawGrams);
         }
       }
       void dishId;
@@ -466,6 +485,9 @@ export default function MealLogScreen() {
         fiber: 0,
         confidence: i.confidence ?? 70,
         source: (i.source as NutritionSource) ?? "manual",
+        cooking_state:
+          ((i as { cooking_state?: CookingState }).cooking_state) ??
+          defaultCookingState(i.name),
         colorCode:
           i.calories > 200 ? "red" : i.calories >= 50 ? "yellow" : "none",
       }));
@@ -498,6 +520,7 @@ export default function MealLogScreen() {
       fiber: 0,
       confidence: 95,
       source: "pantry",
+      cooking_state: defaultCookingState(i.name),
       colorCode: i.calories > 200 ? "red" : i.calories >= 50 ? "yellow" : "none",
     }));
     const dish: DishState = {
@@ -634,6 +657,7 @@ export default function MealLogScreen() {
             fiber: 0,
             confidence: i.confidence ?? 70,
             source: "manual",
+            cooking_state: defaultCookingState(i.name),
             colorCode: "none",
           }));
           if (ingredientSignature(resolved) === sig) matches += 1;
@@ -1152,7 +1176,7 @@ function DishCard({
   onDelete: () => void;
   onEditIngredient: (
     id: string,
-    patch: Partial<Pick<ResolvedIngredient, "quantity" | "calories" | "protein" | "carbs" | "fat">>,
+    patch: Partial<Pick<ResolvedIngredient, "quantity" | "calories" | "protein" | "carbs" | "fat" | "cooking_state">>,
   ) => void;
   onDeleteIngredient: (id: string) => void;
   onServingsMade: (v: string) => void;
@@ -1384,7 +1408,7 @@ function IngredientRow({
 }: {
   ing: ResolvedIngredient;
   colors: Palette;
-  onEdit: (patch: Partial<Pick<ResolvedIngredient, "quantity" | "calories" | "protein" | "carbs" | "fat">>) => void;
+  onEdit: (patch: Partial<Pick<ResolvedIngredient, "quantity" | "calories" | "protein" | "carbs" | "fat" | "cooking_state">>) => void;
   onDelete: () => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -1474,6 +1498,32 @@ function IngredientRow({
     onEdit({ [key]: n });
   };
 
+  // Decoration: when ingredient is convertible, show its cooking state.
+  // When it's a pantry hit logged in cooked form, also surface the raw
+  // grams that will be deducted so the user can see the conversion.
+  const cookingChip = ing.cooking_state !== "irrelevant" ? ing.cooking_state : null;
+  const showPantryDecrement =
+    ing.source === "pantry" && ing.assumed_weight_g > 0;
+  let pantryRawGrams: number | null = null;
+  if (showPantryDecrement) {
+    if (ing.cooking_state === "cooked") {
+      const ratio = getCookingRatio(ing.name) ?? 2.5;
+      pantryRawGrams = Math.round(ing.assumed_weight_g / ratio);
+    } else {
+      pantryRawGrams = Math.round(ing.assumed_weight_g);
+    }
+  }
+
+  const cycleCookingState = () => {
+    const next: CookingState =
+      ing.cooking_state === "cooked"
+        ? "raw"
+        : ing.cooking_state === "raw"
+        ? "irrelevant"
+        : "cooked";
+    onEdit({ cooking_state: next });
+  };
+
   return (
     <View style={[ingStyles.row, { borderColor, backgroundColor: colors.surface }]}>
       <View style={{ flex: 1 }}>
@@ -1482,21 +1532,47 @@ function IngredientRow({
             {capitalize(ing.name)}
           </Text>
           <ConfidenceBadge source={ing.source} />
+          {cookingChip && (
+            <View style={ingStyles.cookChip}>
+              <Text style={ingStyles.cookChipText}>{cookingChip}</Text>
+            </View>
+          )}
         </View>
         <Text style={[ingStyles.meta, { color: colors.textMuted }]}>
           {formatQtyLabel(ing)} · {Math.round(ing.calories)} cal · P{Math.round(ing.protein)} C{Math.round(ing.carbs)} F{Math.round(ing.fat)}
         </Text>
+        {showPantryDecrement && pantryRawGrams != null && (
+          <Text style={[ingStyles.meta, { color: "#166534", fontSize: 13 }]}>
+            pantry: −{pantryRawGrams}g raw
+          </Text>
+        )}
         {ing.flagged && ing.flagReason ? (
           <Text style={ingStyles.flagText}>⚠ {ing.flagReason} — auto-corrected</Text>
         ) : null}
         {editing && (
-          <View style={ingStyles.editGrid}>
-            <EditField label="Qty" value={qty} onChange={handleQtyChange} colors={colors} />
-            <EditField label="Cal" value={cal} onChange={(v) => handleMacroChange("calories", v)} colors={colors} />
-            <EditField label="P" value={pro} onChange={(v) => handleMacroChange("protein", v)} colors={colors} />
-            <EditField label="C" value={carb} onChange={(v) => handleMacroChange("carbs", v)} colors={colors} />
-            <EditField label="F" value={fat} onChange={(v) => handleMacroChange("fat", v)} colors={colors} />
-          </View>
+          <>
+            <View style={ingStyles.editGrid}>
+              <EditField label="Qty" value={qty} onChange={handleQtyChange} colors={colors} />
+              <EditField label="Cal" value={cal} onChange={(v) => handleMacroChange("calories", v)} colors={colors} />
+              <EditField label="P" value={pro} onChange={(v) => handleMacroChange("protein", v)} colors={colors} />
+              <EditField label="C" value={carb} onChange={(v) => handleMacroChange("carbs", v)} colors={colors} />
+              <EditField label="F" value={fat} onChange={(v) => handleMacroChange("fat", v)} colors={colors} />
+            </View>
+            <Pressable
+              onPress={cycleCookingState}
+              style={({ pressed }) => [
+                ingStyles.cookToggle,
+                { borderColor: colors.surfaceBorder },
+                pressed && { opacity: 0.7 },
+              ]}
+            >
+              <Ionicons name="flame-outline" size={14} color={colors.textMuted} />
+              <Text style={[ingStyles.cookToggleText, { color: colors.text }]}>
+                {ing.cooking_state}
+              </Text>
+              <Ionicons name="swap-horizontal" size={12} color={colors.textMuted} />
+            </Pressable>
+          </>
         )}
       </View>
       <View style={ingStyles.actions}>
@@ -1801,6 +1877,35 @@ const ingStyles = StyleSheet.create({
   flagText: { fontSize: 12, color: "#B45309", marginTop: 4, fontWeight: "600" },
   actions: { gap: 14, alignItems: "center" },
   editGrid: { flexDirection: "row", gap: 8, marginTop: 10, flexWrap: "wrap" },
+  cookChip: {
+    backgroundColor: "#FEF3C7",
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+  },
+  cookChipText: {
+    color: "#92400E",
+    fontSize: 11,
+    fontWeight: "800",
+    textTransform: "uppercase",
+    letterSpacing: 0.3,
+  },
+  cookToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    alignSelf: "flex-start",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1,
+    marginTop: 10,
+  },
+  cookToggleText: {
+    fontSize: 13,
+    fontWeight: "700",
+    textTransform: "capitalize",
+  },
 });
 
 const makeStyles = (c: Palette) =>

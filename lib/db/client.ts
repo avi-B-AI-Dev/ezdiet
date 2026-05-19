@@ -1,6 +1,8 @@
 import * as SQLite from "expo-sqlite";
 
 import { COMMON_INGREDIENTS_SEED } from "./common-ingredients-seed";
+import { seedSamplePantryIfEmpty } from "./pantry-seed";
+import { assertPantryMathInvariants } from "../cookingState";
 
 const DB_NAME = "ezdiet.db";
 
@@ -231,6 +233,15 @@ const USER_MIGRATIONS: string[] = [
   "ALTER TABLE meals ADD COLUMN restaurant_name TEXT",
   "ALTER TABLE meals ADD COLUMN from_leftover_dish_id INTEGER REFERENCES dishes(id) ON DELETE SET NULL",
   "ALTER TABLE meals ADD COLUMN from_leftover_servings REAL",
+  "ALTER TABLE pantry_items ADD COLUMN category TEXT",
+  "ALTER TABLE pantry_items ADD COLUMN confidence_score INTEGER",
+  "ALTER TABLE pantry_items ADD COLUMN quantity_purchased REAL",
+  "ALTER TABLE pantry_items ADD COLUMN quantity_remaining REAL",
+  "ALTER TABLE pantry_items ADD COLUMN servings_per_package REAL",
+  "ALTER TABLE pantry_items ADD COLUMN total_package_size REAL",
+  "ALTER TABLE pantry_items ADD COLUMN total_package_unit TEXT",
+  "ALTER TABLE meal_ingredients ADD COLUMN cooking_state TEXT",
+  "ALTER TABLE recipe_ingredients ADD COLUMN cooking_state TEXT",
 ];
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -262,6 +273,78 @@ async function migrateWaterLogToMl(
     DROP TABLE water_log;
     ALTER TABLE water_log_new RENAME TO water_log;
     CREATE INDEX IF NOT EXISTS idx_water_log_logged_at ON water_log(logged_at);
+  `);
+}
+
+// The original pantry_items.source had a tight CHECK constraint
+// (scanned/manual/api_lookup/ai_estimated). The haul flow needs additional
+// labels (label_verified, common_db). SQLite can't ALTER a CHECK constraint
+// in place — we have to rebuild the table once.
+async function migratePantrySourceCheck(
+  db: SQLite.SQLiteDatabase,
+): Promise<void> {
+  const row = await db.getFirstAsync<{ sql: string | null }>(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pantry_items'",
+  );
+  if (!row?.sql) return;
+  const hasOldCheck = /CHECK\s*\(\s*source\s+IN\s*\([^)]*\)\s*\)/i.test(row.sql);
+  if (!hasOldCheck) return;
+
+  const cols = await db.getAllAsync<{ name: string }>(
+    "PRAGMA table_info(pantry_items)",
+  );
+  const have = new Set(cols.map((c) => c.name));
+  const has = (n: string) => (have.has(n) ? n : "NULL");
+
+  await db.execAsync(`
+    CREATE TABLE pantry_items_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      brand TEXT,
+      barcode TEXT,
+      calories_per_100g REAL NOT NULL,
+      protein_per_100g REAL NOT NULL,
+      carbs_per_100g REAL NOT NULL,
+      fat_per_100g REAL NOT NULL,
+      fiber_per_100g REAL,
+      serving_size REAL NOT NULL,
+      serving_unit TEXT NOT NULL,
+      servings_per_package REAL,
+      total_package_size REAL,
+      total_package_unit TEXT,
+      category TEXT,
+      micronutrients TEXT,
+      photo_uri TEXT,
+      source TEXT NOT NULL,
+      confidence_score INTEGER,
+      quantity_purchased REAL,
+      quantity_remaining REAL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+      UNIQUE(name, brand)
+    );
+    INSERT INTO pantry_items_new (
+      id, name, brand, barcode,
+      calories_per_100g, protein_per_100g, carbs_per_100g, fat_per_100g, fiber_per_100g,
+      serving_size, serving_unit,
+      servings_per_package, total_package_size, total_package_unit,
+      category, micronutrients, photo_uri, source, confidence_score,
+      quantity_purchased, quantity_remaining,
+      created_at, updated_at
+    )
+    SELECT
+      id, name, brand, barcode,
+      calories_per_100g, protein_per_100g, carbs_per_100g, fat_per_100g, fiber_per_100g,
+      serving_size, serving_unit,
+      ${has("servings_per_package")}, ${has("total_package_size")}, ${has("total_package_unit")},
+      ${has("category")}, micronutrients, photo_uri, source, ${has("confidence_score")},
+      ${has("quantity_purchased")}, ${has("quantity_remaining")},
+      created_at, updated_at
+    FROM pantry_items;
+    DROP TABLE pantry_items;
+    ALTER TABLE pantry_items_new RENAME TO pantry_items;
+    CREATE INDEX IF NOT EXISTS idx_pantry_name ON pantry_items(name);
+    CREATE INDEX IF NOT EXISTS idx_pantry_barcode ON pantry_items(barcode);
   `);
 }
 
@@ -318,9 +401,19 @@ export function getDatabase(): Promise<SQLite.SQLiteDatabase> {
         console.warn("water_log migration failed:", err);
       }
       try {
+        await migratePantrySourceCheck(db);
+      } catch (err) {
+        console.warn("pantry source migration failed:", err);
+      }
+      try {
         await seedCommonIngredients(db);
       } catch (err) {
         console.warn("common_ingredients seed failed:", err);
+      }
+      try {
+        await seedSamplePantryIfEmpty(db);
+      } catch (err) {
+        console.warn("pantry sample seed failed:", err);
       }
       return db;
     })();
@@ -330,6 +423,9 @@ export function getDatabase(): Promise<SQLite.SQLiteDatabase> {
 
 export async function initDatabase(): Promise<void> {
   await getDatabase();
+  // Boot-time guard: throws in __DEV__ if the pantry math regresses
+  // (e.g. someone breaks the cooking ratio table or unit conversion).
+  assertPantryMathInvariants();
 }
 
 export async function resetDatabase(): Promise<void> {

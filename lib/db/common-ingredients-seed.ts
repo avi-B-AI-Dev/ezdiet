@@ -15,7 +15,11 @@ export const COMMON_INGREDIENTS_SEED: CommonIngredientSeed[] = [
   { name: "white rice", category: "grain", calories_per_100g: 130, protein_per_100g: 2.7, carbs_per_100g: 28, fat_per_100g: 0.3, fiber_per_100g: 0.4, typical_unit: "1 cup cooked", typical_unit_weight_g: 158 },
   { name: "brown rice", category: "grain", calories_per_100g: 112, protein_per_100g: 2.6, carbs_per_100g: 23, fat_per_100g: 0.9, fiber_per_100g: 1.8, typical_unit: "1 cup cooked", typical_unit_weight_g: 195 },
   { name: "basmati rice", category: "grain", calories_per_100g: 121, protein_per_100g: 3.5, carbs_per_100g: 25, fat_per_100g: 0.4, fiber_per_100g: 0.4, typical_unit: "1 cup cooked", typical_unit_weight_g: 163 },
-  { name: "rice", category: "grain", calories_per_100g: 130, protein_per_100g: 2.7, carbs_per_100g: 28, fat_per_100g: 0.3, fiber_per_100g: 0.4, typical_unit: "1 cup cooked", typical_unit_weight_g: 158 },
+  // Generic "rice" calibrated to basmati per USDA (cooked, 121 cal/100g,
+  // 163 g/cup, 2.7g protein/100g). The most common rice in this app's
+  // user base. Applying the 3× raw conversion yields ~363 cal and ~16g
+  // protein per 200g raw, matching the real-world basmati profile.
+  { name: "rice", category: "grain", calories_per_100g: 121, protein_per_100g: 2.7, carbs_per_100g: 27, fat_per_100g: 0.4, fiber_per_100g: 0.4, typical_unit: "1 cup cooked", typical_unit_weight_g: 163 },
   { name: "wheat flour", category: "grain", calories_per_100g: 340, protein_per_100g: 13, carbs_per_100g: 72, fat_per_100g: 2.5, fiber_per_100g: 10.7, typical_unit: "1 cup", typical_unit_weight_g: 120 },
   { name: "atta", category: "grain", calories_per_100g: 340, protein_per_100g: 14, carbs_per_100g: 72, fat_per_100g: 2, fiber_per_100g: 10.7, typical_unit: "1 cup", typical_unit_weight_g: 120 },
   { name: "maida", category: "grain", calories_per_100g: 364, protein_per_100g: 10, carbs_per_100g: 76, fat_per_100g: 1, fiber_per_100g: 2.7, typical_unit: "1 cup", typical_unit_weight_g: 125 },
